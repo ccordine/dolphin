@@ -166,6 +166,21 @@ using StateChangedCallbackFunc = std::function<void(Core::State)>;
 [[nodiscard]] Common::EventHook AddOnStateChangedCallback(StateChangedCallbackFunc callback);
 void NotifyStateChanged(Core::State state);
 
+// Signals that complete emulated save data has reached a host-filesystem flush/close boundary.
+// Listeners must return quickly: this can be triggered from the CPU thread or a memory-card
+// flushing thread.
+using SaveDataChangedCallbackFunc = std::function<void()>;
+
+[[nodiscard]] Common::EventHook AddOnSaveDataChangedCallback(SaveDataChangedCallbackFunc callback);
+void NotifySaveDataChanged();
+
+// Signals that a savestate was loaded successfully. Listeners must return quickly: this is
+// triggered synchronously on the CPU thread after the emulated state has been restored.
+using SavestateLoadedCallbackFunc = std::function<void()>;
+
+[[nodiscard]] Common::EventHook AddOnSavestateLoadedCallback(SavestateLoadedCallbackFunc callback);
+void NotifySavestateLoaded();
+
 void UpdateWantDeterminism(Core::System& system, bool initial = false);
 
 // Queue an arbitrary function to asynchronously run once on the Host thread later.

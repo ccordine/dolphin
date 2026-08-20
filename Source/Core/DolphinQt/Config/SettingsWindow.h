@@ -47,6 +47,7 @@ enum class SettingsWindowPaneIndex : int
   OnScreenDisplay,
   Audio,
   Paths,
+  EmuBank,
   GameCube,
   Wii,
   Triforce,

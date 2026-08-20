@@ -45,6 +45,7 @@
 #include "DolphinQt/Updater.h"
 
 #include "UICommon/CommandLineParse.h"
+#include "UICommon/EmuBankSync.h"
 #include "UICommon/UICommon.h"
 
 static bool QtMsgAlertHandler(const char* caption, const char* text, bool yes_no,
@@ -194,6 +195,7 @@ int main(int argc, char* argv[])
   UICommon::SetUserDirectory(static_cast<const char*>(options.get("user")));
   UICommon::CreateDirectories();
   UICommon::Init();
+  UICommon::EmuBank::Init();
   Resources::Init();
   Settings::Instance().SetBatchModeEnabled(options.is_set("batch"));
 
@@ -309,6 +311,7 @@ int main(int argc, char* argv[])
   }
 
   Core::Shutdown(Core::System::GetInstance());
+  UICommon::EmuBank::Shutdown();
   UICommon::Shutdown();
   Host::GetInstance()->deleteLater();
 

@@ -226,7 +226,10 @@ static bool LoadFromBuffer(Core::System& system, std::span<u8> buffer)
   u8* ptr = buffer.data();
   PointerWrap p(&ptr, buffer.size(), PointerWrap::Mode::Read);
   DoState(system, p);
-  return p.IsReadMode();
+  const bool loaded_successfully = p.IsReadMode();
+  if (loaded_successfully)
+    Core::NotifySavestateLoaded();
+  return loaded_successfully;
 }
 
 // Returns the required size, or 0 on failure.

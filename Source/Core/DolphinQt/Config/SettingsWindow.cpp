@@ -24,6 +24,7 @@
 #include "DolphinQt/Settings.h"
 #include "DolphinQt/Settings/AdvancedPane.h"
 #include "DolphinQt/Settings/AudioPane.h"
+#include "DolphinQt/Settings/EmuBankPane.h"
 #include "DolphinQt/Settings/GameCubePane.h"
 #include "DolphinQt/Settings/GeneralPane.h"
 #include "DolphinQt/Settings/InterfacePane.h"
@@ -198,6 +199,7 @@ SettingsWindow::SettingsWindow(MainWindow* parent) : StackedSettingsWindow{paren
   AddWrappedPane(new OnScreenDisplayPane, tr("On-Screen Display"));
   AddWrappedPane(new AudioPane, tr("Audio"));
   AddWrappedPane(new PathPane, tr("Paths"));
+  AddWrappedPane(new EmuBankPane, tr("EmuBank"));
   AddWrappedPane(new GameCubePane{parent}, tr("GameCube"));
   AddWrappedPane(new WiiPane, tr("Wii"));
   AddWrappedPane(new TriforcePane, tr("Triforce"));

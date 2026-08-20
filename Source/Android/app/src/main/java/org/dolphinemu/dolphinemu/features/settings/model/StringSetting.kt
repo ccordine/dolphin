@@ -69,6 +69,18 @@ enum class StringSetting(
         ""
     ),
     MAIN_WFS_PATH(Settings.FILE_DOLPHIN, Settings.SECTION_INI_GENERAL, "WFSPath", ""),
+    MAIN_EMUBANK_SERVER_URL(
+        Settings.FILE_DOLPHIN,
+        Settings.SECTION_EMUBANK,
+        "ServerURL",
+        ""
+    ),
+    MAIN_EMUBANK_DEVICE_TOKEN(
+        Settings.FILE_DOLPHIN,
+        Settings.SECTION_EMUBANK,
+        "DeviceToken",
+        ""
+    ),
     MAIN_GBA_BIOS_PATH(Settings.FILE_DOLPHIN, Settings.SECTION_INI_GBA, "BIOS", ""),
     MAIN_GB_PLAYER_ROM(Settings.FILE_DOLPHIN, Settings.SECTION_INI_GBA, "GBPlayerRom", ""),
     MAIN_GBA_SAVES_PATH(Settings.FILE_DOLPHIN, Settings.SECTION_INI_GBA, "SavesPath", ""),

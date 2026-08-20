@@ -146,6 +146,14 @@ enum class BooleanSetting(
         "EnablePlayTimeTracking",
         true
     ),
+    MAIN_EMUBANK_ENABLED(Settings.FILE_DOLPHIN, Settings.SECTION_EMUBANK, "Enabled", false),
+    MAIN_EMUBANK_ALLOW_INSECURE(
+        Settings.FILE_DOLPHIN,
+        Settings.SECTION_EMUBANK,
+        "AllowInsecureHTTP",
+        false
+    ),
+    MAIN_EMUBANK_LIVE_SYNC(Settings.FILE_DOLPHIN, Settings.SECTION_EMUBANK, "LiveSync", true),
     MAIN_EXPAND_TO_CUTOUT_AREA(
         Settings.FILE_DOLPHIN,
         Settings.SECTION_INI_INTERFACE,

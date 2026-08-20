@@ -26,7 +26,7 @@ class InputStringSettingViewHolder(
         binding.textSettingName.text = setting.name
 
         if (!TextUtils.isEmpty(inputString)) {
-            binding.textSettingDescription.text = inputString
+            binding.textSettingDescription.text = if (setting.isSecret) "••••••••" else inputString
         } else {
             binding.textSettingDescription.text = setting.description
         }

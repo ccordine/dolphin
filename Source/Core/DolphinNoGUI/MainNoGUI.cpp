@@ -27,6 +27,7 @@
 #ifdef USE_DISCORD_PRESENCE
 #include "UICommon/DiscordPresence.h"
 #endif
+#include "UICommon/EmuBankSync.h"
 #include "UICommon/UICommon.h"
 
 static std::unique_ptr<Platform> s_platform;
@@ -270,10 +271,12 @@ int main(const int argc, char* argv[])
 
   UICommon::SetUserDirectory(user_directory);
   UICommon::Init();
+  UICommon::EmuBank::Init();
   UICommon::InitControllers(wsi);
 
   Common::ScopeGuard ui_common_guard([] {
     UICommon::ShutdownControllers();
+    UICommon::EmuBank::Shutdown();
     UICommon::Shutdown();
   });
 

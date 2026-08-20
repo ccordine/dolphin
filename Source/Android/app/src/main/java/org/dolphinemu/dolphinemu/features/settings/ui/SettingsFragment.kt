@@ -111,6 +111,7 @@ class SettingsFragment : Fragment(), SettingsFragmentView {
     }
 
     override fun onDestroyView() {
+        presenter.onDestroyView()
         super.onDestroyView()
         binding = null
     }
@@ -265,6 +266,7 @@ class SettingsFragment : Fragment(), SettingsFragmentView {
             titles[MenuTag.CONFIG_INTERFACE] = R.string.interface_submenu
             titles[MenuTag.CONFIG_AUDIO] = R.string.audio_submenu
             titles[MenuTag.CONFIG_PATHS] = R.string.paths_submenu
+            titles[MenuTag.CONFIG_EMUBANK] = R.string.emubank_submenu
             titles[MenuTag.CONFIG_GAME_CUBE] = R.string.gamecube_submenu
             titles[MenuTag.CONFIG_SERIALPORT1] = R.string.serialport1_submenu
             titles[MenuTag.CONFIG_WII] = R.string.wii_submenu

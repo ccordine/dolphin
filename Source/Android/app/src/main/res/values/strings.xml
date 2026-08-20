@@ -979,6 +979,35 @@ It can efficiently compress both junk data and encrypted Wii data.
     <string name="wii_speak_permission_warning">Missing Microphone Permission</string>
     <string name="wii_speak_permission_warning_description">Wii Speak emulation requires microphone permission. You might need to restart the game for the permission to be effective.</string>
 
+    <!-- EmuBank -->
+    <string name="emubank_submenu">EmuBank</string>
+    <string name="emubank_cloud_sync">Cloud Save Sync</string>
+    <string name="emubank_cloud_sync_description">Uses EmuBank device bindings below Dolphin’s GC or Wii user-data folders. Cloud downloads happen only while save files are closed; stable local changes can upload while playing.</string>
+    <string name="emubank_enabled">Enable EmuBank cloud sync</string>
+    <string name="emubank_enabled_description">Connect this Dolphin installation to an EmuBank device.</string>
+    <string name="emubank_server_url">Server URL</string>
+    <string name="emubank_server_url_description">The EmuBank base URL or this device’s manifest URL, for example https://bank.example.com.</string>
+    <string name="emubank_connect_account">Connect EmuBank account</string>
+    <string name="emubank_connect_account_description">Open EmuBank in your browser and authorize this Dolphin installation without sharing your password with Dolphin.</string>
+    <string name="emubank_server_required">Enter your EmuBank server URL first.</string>
+    <string name="emubank_browser_unavailable">No browser is available to approve the EmuBank connection.</string>
+    <string name="emubank_browser_unavailable_description">Open this authorization link on this device or another trusted device:\n\n%1$s</string>
+    <string name="emubank_copy_link">Copy link</string>
+    <string name="emubank_approval_link">EmuBank authorization link</string>
+    <string name="emubank_link_copied">EmuBank authorization link copied</string>
+    <string name="emubank_connected">EmuBank connected. Syncing device bindings…</string>
+    <string name="emubank_device_token">Device token (advanced)</string>
+    <string name="emubank_device_token_description">Fallback for self-hosted or older servers: paste the device-id.secret credential shown when creating a Dolphin device. It is stored in Dolphin’s configuration.</string>
+    <string name="emubank_allow_insecure">Allow insecure HTTP</string>
+    <string name="emubank_allow_insecure_description">Permit sending the device credential without TLS. Use only on a network you trust.</string>
+    <string name="emubank_live_sync">Upload live save changes</string>
+    <string name="emubank_live_sync_description">Debounce and upload stable local save changes while a game is running. Remote changes wait until emulation stops.</string>
+    <string name="emubank_sync_interval">Check interval</string>
+    <string name="emubank_sync_interval_description">How frequently Dolphin checks bound save files and the EmuBank manifest.</string>
+    <string name="emubank_sync_now">Sync now</string>
+    <string name="emubank_sync_now_description">Request a sync. Downloads are deferred automatically if emulation is active.</string>
+    <string name="emubank_sync_requested">EmuBank sync requested</string>
+
     <!-- Achievements -->
     <string name="achievements_enabled">Enable Achievements</string>
     <string name="achievements_hardcore_enabled">Enable Hardcore Mode</string>

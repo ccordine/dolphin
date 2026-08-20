@@ -6,6 +6,7 @@
 #include <array>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 
@@ -106,6 +107,9 @@ private:
   bool m_dirty_cache = false;
   u16 m_cache_chain_index = 0;
   std::optional<u64> m_cache_fd;
+  // Intentionally not serialized. It only coalesces host-side cloud-backup notifications, and
+  // clearing it around a savestate is harmless because the periodic sync remains a fallback.
+  std::set<u64> m_save_data_dirty_fds;
   // The first 0x18 IDs are reserved for the PPC.
   u64 m_next_fd = 0x18;
   std::map<u64, Handle> m_fd_map;

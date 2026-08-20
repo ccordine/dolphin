@@ -300,6 +300,28 @@ object NativeLibrary {
     @JvmStatic
     external fun ResetDolphinSettings()
 
+    @JvmStatic
+    external fun RequestEmuBankSync()
+
+    @JvmStatic
+    external fun BeginEmuBankPairing(
+        serverUrl: String,
+        deviceName: String,
+        platform: String
+    ): String
+
+    @JvmStatic
+    external fun GetEmuBankPairingState(): Int
+
+    @JvmStatic
+    external fun GetEmuBankPairingApprovalUrl(): String
+
+    @JvmStatic
+    external fun FinalizeEmuBankPairing(): Boolean
+
+    @JvmStatic
+    external fun GetEmuBankStatus(): String
+
     /**
      * Initializes the native parts of the app.
      *

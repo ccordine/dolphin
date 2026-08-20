@@ -5,6 +5,8 @@ add_library(uicommon
   CommandLineParse.h
   DiscordPresence.cpp
   DiscordPresence.h
+  EmuBankSync.cpp
+  EmuBankSync.h
   GameFile.cpp
   GameFile.h
   GameFileCache.cpp

@@ -4,6 +4,7 @@
 #include "Core/IOS/FS/FileSystemProxy.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <expected>
 #include <string_view>
@@ -13,6 +14,7 @@
 
 #include "Common/ChunkFile.h"
 #include "Common/Swap.h"
+#include "Core/Core.h"
 #include "Core/HW/Memmap.h"
 #include "Core/HW/SystemTimers.h"
 #include "Core/IOS/FS/FileSystem.h"
@@ -22,6 +24,23 @@
 namespace IOS::HLE
 {
 using namespace IOS::HLE::FS;
+
+static bool IsWiiTitleSavePath(std::string_view path)
+{
+  // /title/<type>/<title id>/data/<save file>
+  if (!path.starts_with("/title/") || path.size() <= 30)
+    return false;
+
+  const auto is_hex_component = [](std::string_view component) {
+    return component.size() == 8 &&
+           std::ranges::all_of(component, [](unsigned char c) { return std::isxdigit(c) != 0; });
+  };
+
+  const std::string_view type = path.substr(7, 8);
+  const std::string_view title_id = path.substr(16, 8);
+  return path[15] == '/' && path[24] == '/' && path.substr(25, 5) == "data/" &&
+         is_hex_component(type) && is_hex_component(title_id);
+}
 
 static IPCReply GetFSReply(s32 return_value, SystemTimers::TimeBaseTick extra_tb_ticks = {})
 {
@@ -105,6 +124,8 @@ FSDevice::~FSDevice() = default;
 void FSDevice::DoState(PointerWrap& p)
 {
   Device::DoState(p);
+  if (p.IsReadMode())
+    m_core.m_save_data_dirty_fds.clear();
   p.Do(m_core.m_dirty_cache);
   p.Do(m_core.m_cache_chain_index);
   p.Do(m_core.m_cache_fd);
@@ -219,6 +240,8 @@ s32 FSCore::Close(u64 fd, Ticks ticks)
   ticks.Add(IPC_OVERHEAD_TICKS);
 
   const auto& handle = m_fd_map[fd];
+  const bool save_data_changed =
+      m_save_data_dirty_fds.erase(fd) != 0 && IsWiiTitleSavePath(handle.name.data());
   if (handle.fs_fd != INVALID_FD)
   {
     if (fd == m_cache_fd)
@@ -235,6 +258,9 @@ s32 FSCore::Close(u64 fd, Ticks ticks)
     m_fd_map.erase(fd);
     if (result != ResultCode::Success)
       return ConvertResult(result);
+
+    if (save_data_changed)
+      Core::NotifySaveDataChanged();
   }
   else
   {
@@ -379,6 +405,9 @@ s32 FSCore::Write(u64 fd, const u8* data, u32 size, std::optional<u32> ipc_buffe
 
   if (!result)
     return ConvertResult(result.error());
+
+  if (*result != 0 && IsWiiTitleSavePath(handle.name.data()))
+    m_save_data_dirty_fds.insert(fd);
 
   return *result;
 }
@@ -670,6 +699,11 @@ FS::ResultCode FSCore::RenameFile(FS::Uid uid, FS::Gid gid, const std::string& o
   const ResultCode result = m_ios.GetFS()->Rename(uid, gid, old_path, new_path);
   ticks.Add(GetSuperblockWriteTbTicks(m_ios.GetVersion()));
   LogResult(result, "Rename({}, {})", old_path, new_path);
+  if (result == ResultCode::Success &&
+      (IsWiiTitleSavePath(old_path) || IsWiiTitleSavePath(new_path)))
+  {
+    Core::NotifySaveDataChanged();
+  }
   return result;
 }
 

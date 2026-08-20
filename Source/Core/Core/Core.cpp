@@ -98,6 +98,8 @@ static bool s_wants_determinism;
 // Declarations and definitions
 static std::thread s_emu_thread;
 static Common::HookableEvent<Core::State> s_state_changed_event;
+static Common::HookableEvent<> s_save_data_changed_event;
+static Common::HookableEvent<> s_savestate_loaded_event;
 
 static bool s_is_throttler_temp_disabled = false;
 static bool s_frame_step = false;
@@ -936,6 +938,26 @@ Common::EventHook AddOnStateChangedCallback(StateChangedCallbackFunc callback)
 void NotifyStateChanged(const Core::State state)
 {
   s_state_changed_event.Trigger(state);
+}
+
+Common::EventHook AddOnSaveDataChangedCallback(SaveDataChangedCallbackFunc callback)
+{
+  return s_save_data_changed_event.Register(std::move(callback));
+}
+
+void NotifySaveDataChanged()
+{
+  s_save_data_changed_event.Trigger();
+}
+
+Common::EventHook AddOnSavestateLoadedCallback(SavestateLoadedCallbackFunc callback)
+{
+  return s_savestate_loaded_event.Register(std::move(callback));
+}
+
+void NotifySavestateLoaded()
+{
+  s_savestate_loaded_event.Trigger();
 }
 
 void UpdateWantDeterminism(Core::System& system, bool initial)

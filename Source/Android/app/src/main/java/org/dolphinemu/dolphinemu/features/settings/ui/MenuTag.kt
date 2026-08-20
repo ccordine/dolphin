@@ -11,6 +11,7 @@ enum class MenuTag {
     CONFIG_INTERFACE("config_interface"),
     CONFIG_AUDIO("config_audio"),
     CONFIG_PATHS("config_paths"),
+    CONFIG_EMUBANK("config_emubank"),
     CONFIG_GAME_CUBE("config_gamecube"),
     CONFIG_SERIALPORT1("config_serialport1"),
     CONFIG_WII("config_wii"),

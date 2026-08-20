@@ -220,6 +220,15 @@ extern const Info<std::string> MAIN_SKYLANDERS_PATH;
 std::vector<std::string> GetIsoPaths();
 void SetIsoPaths(std::span<const std::string> paths);
 
+// Main.EmuBank
+
+extern const Info<bool> MAIN_EMUBANK_ENABLED;
+extern const Info<std::string> MAIN_EMUBANK_SERVER_URL;
+extern const Info<std::string> MAIN_EMUBANK_DEVICE_TOKEN;
+extern const Info<bool> MAIN_EMUBANK_ALLOW_INSECURE;
+extern const Info<bool> MAIN_EMUBANK_LIVE_SYNC;
+extern const Info<int> MAIN_EMUBANK_SYNC_INTERVAL;
+
 // Main.GBA
 
 #ifdef HAS_LIBMGBA

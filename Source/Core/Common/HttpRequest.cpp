@@ -188,7 +188,7 @@ std::string HttpRequest::Impl::GetHeaderValue(std::string_view name) const
 {
   for (const auto& [key, value] : m_response_headers)
   {
-    if (key == name)
+    if (CaseInsensitiveEquals(key, name))
       return value.value();
   }
 

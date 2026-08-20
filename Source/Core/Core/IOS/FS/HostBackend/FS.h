@@ -80,6 +80,9 @@ private:
     std::string wii_path;
     std::shared_ptr<File::IOFile> host_file;
     u32 file_offset = 0;
+    // Host-only state. A Wii close is a commit boundary, so flush buffered writes before the
+    // higher-level save-data notification is emitted.
+    bool dirty = false;
   };
   Handle* AssignFreeHandle();
   Handle* GetHandleFromFd(Fd fd);

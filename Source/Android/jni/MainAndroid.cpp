@@ -57,6 +57,7 @@
 #include "DiscIO/ScrubbedBlob.h"
 #include "DiscIO/Volume.h"
 
+#include "UICommon/EmuBankSync.h"
 #include "UICommon/GameFile.h"
 #include "UICommon/UICommon.h"
 
@@ -512,6 +513,44 @@ JNIEXPORT void JNICALL Java_org_dolphinemu_dolphinemu_NativeLibrary_ResetDolphin
   UICommon::SetUserDirectory(File::GetUserPath(D_USER_IDX));
 }
 
+JNIEXPORT void JNICALL Java_org_dolphinemu_dolphinemu_NativeLibrary_RequestEmuBankSync(JNIEnv*,
+                                                                                       jclass)
+{
+  UICommon::EmuBank::RequestSync();
+}
+
+JNIEXPORT jstring JNICALL Java_org_dolphinemu_dolphinemu_NativeLibrary_BeginEmuBankPairing(
+    JNIEnv* env, jclass, jstring j_server_url, jstring j_device_name, jstring j_platform)
+{
+  const UICommon::EmuBank::PairingStartResult result = UICommon::EmuBank::BeginPairing(
+      GetJString(env, j_server_url), GetJString(env, j_device_name), GetJString(env, j_platform));
+  return ToJString(env, result.approval_url);
+}
+
+JNIEXPORT jint JNICALL Java_org_dolphinemu_dolphinemu_NativeLibrary_GetEmuBankPairingState(JNIEnv*,
+                                                                                           jclass)
+{
+  return static_cast<jint>(UICommon::EmuBank::GetPairingState());
+}
+
+JNIEXPORT jstring JNICALL
+Java_org_dolphinemu_dolphinemu_NativeLibrary_GetEmuBankPairingApprovalUrl(JNIEnv* env, jclass)
+{
+  return ToJString(env, UICommon::EmuBank::GetPairingApprovalUrl());
+}
+
+JNIEXPORT jboolean JNICALL
+Java_org_dolphinemu_dolphinemu_NativeLibrary_FinalizeEmuBankPairing(JNIEnv*, jclass)
+{
+  return UICommon::EmuBank::FinalizePairing();
+}
+
+JNIEXPORT jstring JNICALL Java_org_dolphinemu_dolphinemu_NativeLibrary_GetEmuBankStatus(JNIEnv* env,
+                                                                                        jclass)
+{
+  return ToJString(env, UICommon::EmuBank::GetStatus());
+}
+
 JNIEXPORT void JNICALL Java_org_dolphinemu_dolphinemu_NativeLibrary_Initialize(JNIEnv*, jclass)
 {
   UICommon::CreateDirectories();
@@ -520,6 +559,7 @@ JNIEXPORT void JNICALL Java_org_dolphinemu_dolphinemu_NativeLibrary_Initialize(J
 
   WiimoteReal::InitAdapterClass();
   UICommon::Init();
+  UICommon::EmuBank::Init();
   UICommon::InitControllers(WindowSystemInfo(WindowSystemType::Android, nullptr, nullptr, nullptr));
 
   AchievementManager::GetInstance().Init(nullptr);
@@ -586,6 +626,12 @@ static void Run(JNIEnv* env, std::unique_ptr<BootParameters>&& boot, bool riivol
 
   s_game_metadata_is_valid = false;
   Core::Shutdown(Core::System::GetInstance());
+  if (!UICommon::EmuBank::SyncAndWait(std::chrono::seconds{15}))
+  {
+    __android_log_print(ANDROID_LOG_WARN, DOLPHIN_TAG,
+                        "EmuBank final sync did not finish within 15 seconds; background sync may "
+                        "continue");
+  }
 
   env->CallStaticVoidMethod(IDCache::GetNativeLibraryClass(),
                             IDCache::GetFinishEmulationActivity());

@@ -12,6 +12,7 @@ class InputStringSetting(
     setting: AbstractStringSetting,
     titleId: Int,
     descriptionId: Int,
+    val isSecret: Boolean = false,
 ) : SettingsItem(context, titleId, descriptionId) {
     override val type: Int = TYPE_STRING
 

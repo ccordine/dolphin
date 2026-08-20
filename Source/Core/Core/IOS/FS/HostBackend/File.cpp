@@ -113,10 +113,11 @@ ResultCode HostFileSystem::Close(Fd fd)
   if (!handle)
     return ResultCode::Invalid;
 
+  const bool flushed = !handle->dirty || handle->host_file->Flush();
   // Let go of our pointer to the file, it will automatically close if we are the last handle
   // accessing it.
   *handle = Handle{};
-  return ResultCode::Success;
+  return flushed ? ResultCode::Success : ResultCode::AccessDenied;
 }
 
 Result<u32> HostFileSystem::ReadBytesFromFile(Fd fd, u8* ptr, u32 count)
@@ -161,6 +162,7 @@ Result<u32> HostFileSystem::WriteBytesToFile(Fd fd, const u8* ptr, u32 count)
     return std::unexpected{ResultCode::AccessDenied};
 
   handle->file_offset += count;
+  handle->dirty = true;
   return count;
 }
 

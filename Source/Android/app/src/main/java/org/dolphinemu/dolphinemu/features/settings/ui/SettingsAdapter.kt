@@ -8,6 +8,7 @@ import android.content.Intent
 import android.graphics.PorterDuff
 import android.os.Build
 import android.provider.DocumentsContract
+import android.text.InputType
 import android.text.format.DateFormat
 import android.view.LayoutInflater
 import android.view.ViewGroup
@@ -160,6 +161,10 @@ class SettingsAdapter(
         val inflater = LayoutInflater.from(context)
         val binding = DialogInputStringBinding.inflate(inflater)
         val input = binding.input
+        if (item.isSecret) {
+            input.inputType =
+                InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
         input.setText(item.selectedValue)
         dialog = MaterialAlertDialogBuilder(fragmentView.fragmentActivity)
             .setView(binding.root)

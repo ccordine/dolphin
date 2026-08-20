@@ -33,6 +33,12 @@ enum class IntSetting(
     MAIN_SI_DEVICE_3(Settings.FILE_DOLPHIN, Settings.SECTION_INI_CORE, "SIDevice3", 0),
     MAIN_AUDIO_VOLUME(Settings.FILE_DOLPHIN, Settings.SECTION_INI_DSP, "Volume", 100),
     MAIN_AUDIO_BUFFER_SIZE(Settings.FILE_DOLPHIN, Settings.SECTION_INI_DSP, "AudioBufferSize", 80),
+    MAIN_EMUBANK_SYNC_INTERVAL(
+        Settings.FILE_DOLPHIN,
+        Settings.SECTION_EMUBANK,
+        "SyncIntervalSeconds",
+        5
+    ),
     MAIN_OVERLAY_GC_CONTROLLER(
         Settings.FILE_DOLPHIN,
         Settings.SECTION_INI_ANDROID,

@@ -73,6 +73,7 @@ MemoryCard::MemoryCard(std::string filename, ExpansionInterface::Slot card_slot,
     memset(&m_memcard_data[MC_HDR_SIZE], 0xFF, m_memory_card_size - MC_HDR_SIZE);
 
     INFO_LOG_FMT(EXPANSIONINTERFACE, "No memory card found. A new one was created instead.");
+    m_dirty.Set();
   }
 
   // Class members (including inherited ones) have now been initialized, so
@@ -107,13 +108,12 @@ void MemoryCard::FlushThread()
     // If triggered, we're exiting.
     // If timed out, check if we need to flush.
     const bool do_exit = m_flush_trigger.WaitFor(flush_interval);
-    if (!do_exit)
+    const bool is_dirty = m_dirty.TestAndClear();
+    if (!is_dirty)
     {
-      const bool is_dirty = m_dirty.TestAndClear();
-      if (!is_dirty)
-      {
-        continue;
-      }
+      if (do_exit)
+        return;
+      continue;
     }
 
     // Opening the file is purposefully done each iteration to ensure the
@@ -150,14 +150,26 @@ void MemoryCard::FlushThread()
       std::unique_lock l(m_flush_mutex);
       memcpy(&m_flush_buffer[0], &m_memcard_data[0], m_memory_card_size);
     }
-    file.WriteBytes(&m_flush_buffer[0], m_memory_card_size);
+    const bool write_succeeded =
+        file.WriteBytes(&m_flush_buffer[0], m_memory_card_size) && file.Flush() && file.Close();
+
+    if (write_succeeded)
+      Core::NotifySaveDataChanged();
+    else
+    {
+      m_dirty.Set();
+      ERROR_LOG_FMT(EXPANSIONINTERFACE, "Failed to flush memory card {}", m_filename);
+    }
 
     if (do_exit)
       return;
 
-    Core::DisplayMessage(fmt::format("Wrote to Memory Card {}",
-                                     m_card_slot == ExpansionInterface::Slot::A ? 'A' : 'B'),
-                         4000);
+    if (write_succeeded)
+    {
+      Core::DisplayMessage(fmt::format("Wrote to Memory Card {}",
+                                       m_card_slot == ExpansionInterface::Slot::A ? 'A' : 'B'),
+                           4000);
+    }
   }
 }
 

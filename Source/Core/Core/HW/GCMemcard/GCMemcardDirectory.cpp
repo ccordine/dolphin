@@ -620,6 +620,7 @@ bool GCMemcardDirectory::SetUsedBlocks(int save_index)
 void GCMemcardDirectory::FlushToFile()
 {
   std::unique_lock l(m_write_mutex);
+  bool save_data_changed = false;
   Memcard::DEntry invalid;
   for (Memcard::GCIFile& save : m_saves)
   {
@@ -663,12 +664,15 @@ void GCMemcardDirectory::FlushToFile()
           for (const Memcard::GCMBlock& block : save.m_save_data)
             gci.WriteBytes(block.m_block.data(), Memcard::BLOCK_SIZE);
 
-          if (gci.IsGood())
+          const bool write_succeeded = gci.IsGood() && gci.Flush() && gci.Close();
+          if (write_succeeded)
           {
+            save_data_changed = true;
             Core::DisplayMessage("Wrote save contents to GCI Folder", 4000);
           }
           else
           {
+            save.m_dirty = true;
             Core::DisplayMessage(
                 fmt::format("Failed to write save contents to {}", save.m_filename), 10000);
             ERROR_LOG_FMT(EXPANSIONINTERFACE, "Failed to save data to {}", save.m_filename);
@@ -676,6 +680,7 @@ void GCMemcardDirectory::FlushToFile()
         }
         else
         {
+          save.m_dirty = true;
           Core::DisplayMessage(
               fmt::format("Failed to open file at {} for writing", save.m_filename), 10000);
           ERROR_LOG_FMT(EXPANSIONINTERFACE, "Failed to open file at {} for writing",
@@ -714,6 +719,9 @@ void GCMemcardDirectory::FlushToFile()
   File::IOFile hdrfile(m_save_directory + MC_HDR, "wb");
   hdrfile.WriteBytes(mc, BLOCK_SIZE * MC_FST_BLOCKS);
 #endif
+  l.unlock();
+  if (save_data_changed)
+    Core::NotifySaveDataChanged();
 }
 
 void GCMemcardDirectory::DoState(PointerWrap& p)

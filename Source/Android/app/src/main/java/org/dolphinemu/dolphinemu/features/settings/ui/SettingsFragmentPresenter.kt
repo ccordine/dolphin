@@ -2,16 +2,26 @@
 
 package org.dolphinemu.dolphinemu.features.settings.ui
 
+import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.text.TextUtils
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.collection.ArraySet
+import androidx.core.net.toUri
+import androidx.lifecycle.lifecycleScope
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.dolphinemu.dolphinemu.NativeLibrary
@@ -51,6 +61,8 @@ class SettingsFragmentPresenter(
     private var serialPort1Type = 0
     private var controllerNumber = 0
     private var controllerType = 0
+    private var emuBankPairingJob: Job? = null
+    private var emuBankApprovalDialog: AlertDialog? = null
 
     var gpuDriver: GpuDriverMetadata? = null
     private val libNameSetting: StringSetting = StringSetting.GFX_DRIVER_LIB_NAME
@@ -86,6 +98,17 @@ class SettingsFragmentPresenter(
         }
 
         this.settings = settings
+
+        if (menuTag == MenuTag.CONFIG_EMUBANK) {
+            resumeEmuBankPairingIfNeeded()
+        }
+    }
+
+    fun onDestroyView() {
+        emuBankPairingJob?.cancel()
+        emuBankPairingJob = null
+        emuBankApprovalDialog?.dismiss()
+        emuBankApprovalDialog = null
     }
 
     var settings: Settings? = null
@@ -108,6 +131,7 @@ class SettingsFragmentPresenter(
             MenuTag.CONFIG_INTERFACE -> addInterfaceSettings(sl)
             MenuTag.CONFIG_AUDIO -> addAudioSettings(sl)
             MenuTag.CONFIG_PATHS -> addPathsSettings(sl)
+            MenuTag.CONFIG_EMUBANK -> addEmuBankSettings(sl)
             MenuTag.CONFIG_GAME_CUBE -> addGameCubeSettings(sl)
             MenuTag.CONFIG_WII -> addWiiSettings(sl)
             MenuTag.CONFIG_ACHIEVEMENTS -> addAchievementSettings(sl);
@@ -198,6 +222,9 @@ class SettingsFragmentPresenter(
         sl.add(SubmenuSetting(context, R.string.interface_submenu, MenuTag.CONFIG_INTERFACE))
         sl.add(SubmenuSetting(context, R.string.audio_submenu, MenuTag.CONFIG_AUDIO))
         sl.add(SubmenuSetting(context, R.string.paths_submenu, MenuTag.CONFIG_PATHS))
+        if (gameId.isNullOrEmpty()) {
+            sl.add(SubmenuSetting(context, R.string.emubank_submenu, MenuTag.CONFIG_EMUBANK))
+        }
         sl.add(SubmenuSetting(context, R.string.gamecube_submenu, MenuTag.CONFIG_GAME_CUBE))
         sl.add(SubmenuSetting(context, R.string.wii_submenu, MenuTag.CONFIG_WII))
         sl.add(SubmenuSetting(context, R.string.achievements_submenu, MenuTag.CONFIG_ACHIEVEMENTS))
@@ -292,6 +319,198 @@ class SettingsFragmentPresenter(
                 R.string.enable_save_states_description
             )
         )
+    }
+
+    private fun addEmuBankSettings(sl: ArrayList<SettingsItem>) {
+        sl.add(
+            HeaderSetting(
+                context,
+                R.string.emubank_cloud_sync,
+                R.string.emubank_cloud_sync_description
+            )
+        )
+        sl.add(
+            SwitchSetting(
+                context,
+                BooleanSetting.MAIN_EMUBANK_ENABLED,
+                R.string.emubank_enabled,
+                R.string.emubank_enabled_description
+            )
+        )
+        sl.add(
+            InputStringSetting(
+                context,
+                StringSetting.MAIN_EMUBANK_SERVER_URL,
+                R.string.emubank_server_url,
+                R.string.emubank_server_url_description
+            )
+        )
+        sl.add(
+            RunRunnable(
+                context,
+                R.string.emubank_connect_account,
+                R.string.emubank_connect_account_description,
+                0,
+                0,
+                true
+            ) { startEmuBankPairing() }
+        )
+        sl.add(
+            InputStringSetting(
+                context,
+                StringSetting.MAIN_EMUBANK_DEVICE_TOKEN,
+                R.string.emubank_device_token,
+                R.string.emubank_device_token_description,
+                isSecret = true
+            )
+        )
+        sl.add(
+            SwitchSetting(
+                context,
+                BooleanSetting.MAIN_EMUBANK_ALLOW_INSECURE,
+                R.string.emubank_allow_insecure,
+                R.string.emubank_allow_insecure_description
+            )
+        )
+        sl.add(
+            SwitchSetting(
+                context,
+                BooleanSetting.MAIN_EMUBANK_LIVE_SYNC,
+                R.string.emubank_live_sync,
+                R.string.emubank_live_sync_description
+            )
+        )
+        sl.add(
+            IntSliderSetting(
+                context,
+                IntSetting.MAIN_EMUBANK_SYNC_INTERVAL,
+                R.string.emubank_sync_interval,
+                R.string.emubank_sync_interval_description,
+                5,
+                300,
+                " s",
+                5
+            )
+        )
+        sl.add(
+            RunRunnable(
+                context,
+                R.string.emubank_sync_now,
+                R.string.emubank_sync_now_description,
+                0,
+                R.string.emubank_sync_requested,
+                true
+            ) { NativeLibrary.RequestEmuBankSync() }
+        )
+    }
+
+    private fun startEmuBankPairing() {
+        if (emuBankPairingJob?.isActive == true) {
+            fragmentView.showToastMessage(NativeLibrary.GetEmuBankStatus())
+            return
+        }
+
+        val pairingState = NativeLibrary.GetEmuBankPairingState()
+        if (pairingState == EMUBANK_PAIRING_WAITING || pairingState == EMUBANK_PAIRING_READY) {
+            resumeEmuBankPairingIfNeeded()
+            fragmentView.showToastMessage(NativeLibrary.GetEmuBankStatus())
+            return
+        }
+
+        val serverUrl = StringSetting.MAIN_EMUBANK_SERVER_URL.string.trim()
+        if (serverUrl.isEmpty()) {
+            fragmentView.showToastMessage(context.getString(R.string.emubank_server_required))
+            return
+        }
+
+        val activity = fragmentView.fragmentActivity
+        emuBankPairingJob = activity.lifecycleScope.launch {
+            val approvalUrl = withContext(Dispatchers.IO) {
+                NativeLibrary.BeginEmuBankPairing(
+                    serverUrl,
+                    "Dolphin on ${Build.MODEL}",
+                    "Android ${Build.VERSION.RELEASE}"
+                )
+            }
+            if (approvalUrl.isEmpty()) {
+                fragmentView.showToastMessage(NativeLibrary.GetEmuBankStatus())
+                return@launch
+            }
+
+            openEmuBankApprovalUrl(approvalUrl)
+
+            waitForEmuBankPairing()
+        }
+    }
+
+    private fun resumeEmuBankPairingIfNeeded() {
+        if (emuBankPairingJob?.isActive == true) {
+            return
+        }
+
+        val pairingState = NativeLibrary.GetEmuBankPairingState()
+        if (pairingState != EMUBANK_PAIRING_WAITING && pairingState != EMUBANK_PAIRING_READY) {
+            return
+        }
+
+        emuBankPairingJob = fragmentView.fragmentActivity.lifecycleScope.launch {
+            waitForEmuBankPairing(openApprovalUrlWhenAvailable = true)
+        }
+    }
+
+    private suspend fun waitForEmuBankPairing(openApprovalUrlWhenAvailable: Boolean = false) {
+        var approvalUrlHandled = !openApprovalUrlWhenAvailable
+        while (NativeLibrary.GetEmuBankPairingState() == EMUBANK_PAIRING_WAITING) {
+            if (!approvalUrlHandled) {
+                val approvalUrl = NativeLibrary.GetEmuBankPairingApprovalUrl()
+                if (approvalUrl.isNotEmpty()) {
+                    openEmuBankApprovalUrl(approvalUrl)
+                    approvalUrlHandled = true
+                }
+            }
+            delay(1000)
+        }
+
+        emuBankApprovalDialog?.dismiss()
+        emuBankApprovalDialog = null
+        if (NativeLibrary.GetEmuBankPairingState() == EMUBANK_PAIRING_READY &&
+            NativeLibrary.FinalizeEmuBankPairing()
+        ) {
+            fragmentView.adapter?.notifyAllSettingsChanged()
+            fragmentView.showToastMessage(context.getString(R.string.emubank_connected))
+        } else {
+            fragmentView.showToastMessage(NativeLibrary.GetEmuBankStatus())
+        }
+    }
+
+    private fun openEmuBankApprovalUrl(approvalUrl: String) {
+        try {
+            fragmentView.fragmentActivity.startActivity(
+                Intent(Intent.ACTION_VIEW, approvalUrl.toUri())
+            )
+        } catch (_: ActivityNotFoundException) {
+            showEmuBankApprovalUrl(approvalUrl)
+        }
+    }
+
+    private fun showEmuBankApprovalUrl(approvalUrl: String) {
+        val activity = fragmentView.fragmentActivity
+        emuBankApprovalDialog = MaterialAlertDialogBuilder(activity)
+            .setTitle(R.string.emubank_browser_unavailable)
+            .setMessage(
+                context.getString(R.string.emubank_browser_unavailable_description, approvalUrl)
+            )
+            .setPositiveButton(R.string.emubank_copy_link) { _, _ ->
+                activity.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(
+                    ClipData.newPlainText(
+                        context.getString(R.string.emubank_approval_link),
+                        approvalUrl
+                    )
+                )
+                fragmentView.showToastMessage(context.getString(R.string.emubank_link_copied))
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
     }
 
     private fun addInterfaceSettings(sl: ArrayList<SettingsItem>) {
@@ -2895,6 +3114,9 @@ class SettingsFragmentPresenter(
     }
 
     companion object {
+        private const val EMUBANK_PAIRING_WAITING = 1
+        private const val EMUBANK_PAIRING_READY = 2
+
         const val ARG_CONTROLLER_TYPE = "controller_type"
         const val ARG_SERIALPORT1_TYPE = "serialport1_type"
 

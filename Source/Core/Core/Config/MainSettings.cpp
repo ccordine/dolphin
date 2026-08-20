@@ -394,6 +394,15 @@ void SetIsoPaths(std::span<const std::string> paths)
   Config::SetBase(Config::MAIN_ISO_PATH_COUNT, MathUtil::SaturatingCast<int>(new_size));
 }
 
+// Main.EmuBank
+
+const Info<bool> MAIN_EMUBANK_ENABLED{{System::Main, "EmuBank", "Enabled"}, false};
+const Info<std::string> MAIN_EMUBANK_SERVER_URL{{System::Main, "EmuBank", "ServerURL"}, ""};
+const Info<std::string> MAIN_EMUBANK_DEVICE_TOKEN{{System::Main, "EmuBank", "DeviceToken"}, ""};
+const Info<bool> MAIN_EMUBANK_ALLOW_INSECURE{{System::Main, "EmuBank", "AllowInsecureHTTP"}, false};
+const Info<bool> MAIN_EMUBANK_LIVE_SYNC{{System::Main, "EmuBank", "LiveSync"}, true};
+const Info<int> MAIN_EMUBANK_SYNC_INTERVAL{{System::Main, "EmuBank", "SyncIntervalSeconds"}, 5};
+
 // Main.GBA
 
 #ifdef HAS_LIBMGBA
