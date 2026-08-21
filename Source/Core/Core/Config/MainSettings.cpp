@@ -401,7 +401,7 @@ const Info<std::string> MAIN_EMUBANK_SERVER_URL{{System::Main, "EmuBank", "Serve
 const Info<std::string> MAIN_EMUBANK_DEVICE_TOKEN{{System::Main, "EmuBank", "DeviceToken"}, ""};
 const Info<bool> MAIN_EMUBANK_ALLOW_INSECURE{{System::Main, "EmuBank", "AllowInsecureHTTP"}, false};
 const Info<bool> MAIN_EMUBANK_LIVE_SYNC{{System::Main, "EmuBank", "LiveSync"}, true};
-const Info<int> MAIN_EMUBANK_SYNC_INTERVAL{{System::Main, "EmuBank", "SyncIntervalSeconds"}, 5};
+const Info<int> MAIN_EMUBANK_SYNC_INTERVAL{{System::Main, "EmuBank", "SyncIntervalSeconds"}, 30};
 
 // Main.GBA
 

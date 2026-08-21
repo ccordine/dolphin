@@ -12,9 +12,13 @@
 #include "VideoCommon/VideoCommon.h"
 
 #include <array>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <tuple>
+#include <utility>
+#include <vector>
 
 class AbstractTexture;
 struct SurfaceInfo;
@@ -31,6 +35,31 @@ class Presenter
 {
 public:
   using ClearColor = std::array<float, 4>;
+  using SurfaceRetirementCallback = std::function<void()>;
+
+  // Keeps the present mutex locked while a backend consumes a native surface handle, then retires
+  // replaced frontend handles only after the backend has stopped using them.
+  class SurfaceChange final
+  {
+  public:
+    SurfaceChange(SurfaceChange&&) = default;
+    SurfaceChange& operator=(SurfaceChange&&) = delete;
+    ~SurfaceChange();
+
+    void* GetHandle() const { return m_handle; }
+
+  private:
+    friend class Presenter;
+    SurfaceChange(std::unique_lock<std::mutex> lock, void* handle,
+                  std::vector<SurfaceRetirementCallback> retirements)
+        : m_lock(std::move(lock)), m_handle(handle), m_retirements(std::move(retirements))
+    {
+    }
+
+    std::unique_lock<std::mutex> m_lock;
+    void* m_handle;
+    std::vector<SurfaceRetirementCallback> m_retirements;
+  };
 
   Presenter();
   virtual ~Presenter();
@@ -91,11 +120,14 @@ public:
   VideoCommon::PostProcessing* GetPostProcessor() const { return m_post_processor.get(); }
   // Final surface changing
   // This is called when the surface is resized (WX) or the window changes (Android).
-  void ChangeSurface(void* new_surface_handle);
+  // The optional retirement callback runs only after the video backend has stopped using the
+  // replaced surface. Multiple frontend changes coalesced into one event retain every callback.
+  void ChangeSurface(void* new_surface_handle, SurfaceRetirementCallback retirement = {});
   void ResizeSurface();
   bool SurfaceResizedTestAndClear() { return m_surface_resized.TestAndClear(); }
-  bool SurfaceChangedTestAndClear() { return m_surface_changed.TestAndClear(); }
-  void* GetNewSurfaceHandle();
+  // Atomically consumes a pending surface change. An engaged optional containing nullptr is a
+  // real surface-destroyed event; std::nullopt means there is no pending event.
+  std::optional<SurfaceChange> TakeSurfaceChange();
 
   void SetKeyMap(const DolphinKeyMap& key_map);
 
@@ -141,6 +173,7 @@ private:
   AbstractTextureFormat m_backbuffer_format = AbstractTextureFormat::Undefined;
 
   void* m_new_surface_handle = nullptr;
+  std::vector<SurfaceRetirementCallback> m_surface_retirements;
   Common::Flag m_surface_changed;
   Common::Flag m_surface_resized;
 
@@ -198,3 +231,6 @@ private:
 }  // namespace VideoCommon
 
 extern std::unique_ptr<VideoCommon::Presenter> g_presenter;
+// Guards creation, destruction, and frontend access to g_presenter. Video-thread callers that are
+// guaranteed to run between initialization and shutdown do not need to take this lock.
+extern std::mutex g_presenter_mutex;

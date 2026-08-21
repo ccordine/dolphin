@@ -98,6 +98,7 @@ private:
 
   std::unique_ptr<SwapChain> m_swap_chain;
   float m_backbuffer_scale;
+  bool m_surface_available = true;
 
   // Keep a copy of sampler states to avoid cache lookups every draw
   std::array<SamplerState, VideoCommon::MAX_PIXEL_SHADER_SAMPLERS> m_sampler_states = {};

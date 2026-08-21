@@ -983,6 +983,7 @@ It can efficiently compress both junk data and encrypted Wii data.
     <string name="emubank_submenu">EmuBank</string>
     <string name="emubank_cloud_sync">Cloud Save Sync</string>
     <string name="emubank_cloud_sync_description">Uses EmuBank device bindings below Dolphin’s GC or Wii user-data folders. Cloud downloads happen only while save files are closed; stable local changes can upload while playing.</string>
+    <string name="emubank_status">Status</string>
     <string name="emubank_enabled">Enable EmuBank cloud sync</string>
     <string name="emubank_enabled_description">Connect this Dolphin installation to an EmuBank device.</string>
     <string name="emubank_server_url">Server URL</string>
@@ -1003,7 +1004,7 @@ It can efficiently compress both junk data and encrypted Wii data.
     <string name="emubank_live_sync">Upload live save changes</string>
     <string name="emubank_live_sync_description">Debounce and upload stable local save changes while a game is running. Remote changes wait until emulation stops.</string>
     <string name="emubank_sync_interval">Check interval</string>
-    <string name="emubank_sync_interval_description">How frequently Dolphin checks bound save files and the EmuBank manifest.</string>
+    <string name="emubank_sync_interval_description">How frequently Dolphin checks cloud changes while no game is running. In-game uploads are triggered by save writes.</string>
     <string name="emubank_sync_now">Sync now</string>
     <string name="emubank_sync_now_description">Request a sync. Downloads are deferred automatically if emulation is active.</string>
     <string name="emubank_sync_requested">EmuBank sync requested</string>

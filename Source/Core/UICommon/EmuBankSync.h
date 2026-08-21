@@ -42,6 +42,9 @@ bool FinalizePairing();
 // Requests a background sync. Downloads are deferred automatically while emulation is active.
 void RequestSync();
 
+// Returns whether a manifest, upload, or download pass is currently in progress.
+bool IsSyncing();
+
 // Requests a fresh stopped-emulation sync and waits up to the supplied bound for that request to
 // finish. This is intended for orderly frontend shutdown paths, not UI threads.
 bool SyncAndWait(std::chrono::milliseconds timeout);

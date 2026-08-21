@@ -3,6 +3,7 @@
 package org.dolphinemu.dolphinemu.features.settings.ui.viewholder
 
 import android.view.View
+import androidx.core.view.isVisible
 import org.dolphinemu.dolphinemu.databinding.ListItemHeaderBinding
 import org.dolphinemu.dolphinemu.features.settings.model.view.SettingsItem
 import org.dolphinemu.dolphinemu.features.settings.ui.SettingsAdapter
@@ -19,6 +20,8 @@ open class HeaderViewHolder(
 
     override fun bind(item: SettingsItem) {
         binding.textHeaderName.text = item.name
+        binding.textHeaderDescription.text = item.description
+        binding.textHeaderDescription.isVisible = item.description.isNotEmpty()
     }
 
     override fun onClick(clicked: View) {

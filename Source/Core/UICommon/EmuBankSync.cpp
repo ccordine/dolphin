@@ -10,6 +10,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstddef>
+#include <cstring>
 #include <filesystem>
 #include <limits>
 #include <map>
@@ -37,11 +38,22 @@
 #include "Common/JsonUtil.h"
 #include "Common/Logging/Log.h"
 #include "Common/Random.h"
+#include "Common/ScopeGuard.h"
 #include "Common/StringUtil.h"
 #include "Common/Thread.h"
 
 #include "Core/Config/MainSettings.h"
+#include "Core/ConfigManager.h"
 #include "Core/Core.h"
+#include "Core/HW/EXI/EXI.h"
+#include "Core/HW/EXI/EXI_Device.h"
+#include "Core/HW/GCMemcard/GCMemcard.h"
+#include "Core/HW/GCMemcard/GCMemcardDirectory.h"
+#include "Core/System.h"
+
+#include "DiscIO/Enums.h"
+
+#include "VideoCommon/OnScreenDisplay.h"
 
 namespace UICommon::EmuBank
 {
@@ -52,9 +64,12 @@ using namespace std::chrono_literals;
 constexpr std::chrono::seconds HTTP_TIMEOUT = 8s;
 constexpr std::chrono::seconds HTTP_TOTAL_TIMEOUT = 60s;
 constexpr std::chrono::seconds SYNC_OPERATION_TIMEOUT = 30s;
+constexpr std::chrono::seconds BEFORE_LAUNCH_OPERATION_TIMEOUT = 12s;
 constexpr std::chrono::seconds LIVE_UPLOAD_DEBOUNCE = 2s;
 constexpr std::chrono::milliseconds SAVE_EVENT_QUIET_PERIOD = 750ms;
 constexpr u64 MAX_PAIRING_RESPONSE_SIZE = 256 * 1024;
+constexpr u64 MAX_BINDING_RESOLUTION_RESPONSE_SIZE = 256 * 1024;
+constexpr u64 MAX_MANIFEST_RESPONSE_SIZE = 2 * 1024 * 1024;
 constexpr u64 MAX_SAVE_SIZE = 64 * 1024 * 1024;
 constexpr std::string_view ZERO_SHA256 =
     "0000000000000000000000000000000000000000000000000000000000000000";
@@ -73,6 +88,43 @@ enum class UploadResult
   Failed,
 };
 
+enum class OsdTone
+{
+  Progress,
+  Success,
+  Warning,
+  Error,
+};
+
+void DisplaySyncMessage(std::string message, u32 milliseconds, OsdTone tone = OsdTone::Progress)
+{
+  if (!Core::IsRunningOrStarting(Core::System::GetInstance()))
+    return;
+
+  // Keep the same conservative character policy as Core::DisplayMessage while using one typed
+  // slot so successive EmuBank phases replace each other instead of flooding the OSD.
+  std::erase_if(message, [](char character) { return !Common::IsPrintableCharacter(character); });
+  if (message.empty())
+    return;
+
+  u32 color = OSD::Color::CYAN;
+  switch (tone)
+  {
+  case OsdTone::Success:
+    color = OSD::Color::GREEN;
+    break;
+  case OsdTone::Warning:
+    color = OSD::Color::YELLOW;
+    break;
+  case OsdTone::Error:
+    color = OSD::Color::RED;
+    break;
+  case OsdTone::Progress:
+    break;
+  }
+  OSD::AddTypedMessage(OSD::MessageType::EmuBank, std::move(message), milliseconds, color);
+}
+
 struct Revision
 {
   std::string id;
@@ -84,6 +136,7 @@ struct Binding
 {
   std::string id;
   std::string relative_path;
+  std::string game_id;
   std::string sync_mode;
   std::string status;
   std::optional<Revision> current_revision;
@@ -102,6 +155,18 @@ struct Connection
   std::string token;
 };
 
+struct SyncConfig
+{
+  bool enabled = false;
+  std::string server_url;
+  std::string device_token;
+  bool allow_insecure = false;
+  bool live_sync = false;
+  int interval = 0;
+
+  bool operator==(const SyncConfig&) const = default;
+};
+
 struct LocalState
 {
   std::string base_sha256;
@@ -115,6 +180,47 @@ struct FileSnapshot
 {
   std::vector<u8> contents;
   std::string sha256;
+};
+
+struct GameIdentity
+{
+  std::string platform;
+  std::string game_id;
+  std::string title;
+  std::string region;
+  u16 revision = 0;
+};
+
+struct LocalSaveCandidate
+{
+  std::string absolute_path;
+  std::string relative_path;
+  FileSnapshot snapshot;
+};
+
+struct SaveLocation
+{
+  std::string absolute_directory;
+  std::string relative_directory;
+  std::vector<LocalSaveCandidate> files;
+};
+
+enum class ResolveDisposition
+{
+  Resolved,
+  ActionRequired,
+  RetryableFailure,
+};
+
+struct ResolveResult
+{
+  ResolveDisposition disposition = ResolveDisposition::RetryableFailure;
+  std::optional<Binding> binding;
+  std::string status;
+  std::string match_method;
+  double match_confidence = 0.0;
+  std::string next_action;
+  std::string message;
 };
 
 struct PendingUpload
@@ -149,6 +255,24 @@ std::string Trim(std::string_view value)
   return std::string{StripWhitespace(value)};
 }
 
+SyncConfig ReadSyncConfig()
+{
+  return {
+      .enabled = Config::Get(Config::MAIN_EMUBANK_ENABLED),
+      .server_url = Config::Get(Config::MAIN_EMUBANK_SERVER_URL),
+      .device_token = Config::Get(Config::MAIN_EMUBANK_DEVICE_TOKEN),
+      .allow_insecure = Config::Get(Config::MAIN_EMUBANK_ALLOW_INSECURE),
+      .live_sync = Config::Get(Config::MAIN_EMUBANK_LIVE_SYNC),
+      .interval = Config::Get(Config::MAIN_EMUBANK_SYNC_INTERVAL),
+  };
+}
+
+std::string BindingDisplayName(std::string_view relative_path)
+{
+  const size_t separator = relative_path.find_last_of("/\\");
+  return std::string{relative_path.substr(separator == std::string_view::npos ? 0 : separator + 1)};
+}
+
 bool IsSha256(std::string_view value)
 {
   return value.size() == 64 && std::ranges::all_of(value, [](char c) {
@@ -164,6 +288,20 @@ bool IsSafeIdentifier(std::string_view value)
   return std::ranges::all_of(value, [](const char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-';
   });
+}
+
+bool IsDolphinGameId(std::string_view value)
+{
+  return value.size() == 6 && std::ranges::all_of(value, [](const char c) {
+           return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+         });
+}
+
+bool IsSafeGameIdentifier(std::string_view value)
+{
+  return value.size() >= 4 && value.size() <= 40 && std::ranges::all_of(value, [](const char c) {
+           return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+         });
 }
 
 bool IsSafeSecret(std::string_view value)
@@ -199,6 +337,13 @@ Common::HttpRequest::ProgressCallback LimitTransfer(
            within_limit(download_total, max_download) && within_limit(download_now, max_download) &&
            within_limit(upload_total, max_upload) && within_limit(upload_now, max_upload);
   };
+}
+
+std::chrono::milliseconds HttpTimeoutUntil(std::chrono::steady_clock::time_point deadline)
+{
+  const auto remaining = std::max(1ms, std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           deadline - std::chrono::steady_clock::now()));
+  return std::min(std::chrono::duration_cast<std::chrono::milliseconds>(HTTP_TIMEOUT), remaining);
 }
 
 std::string CalculateSha256(std::span<const u8> bytes)
@@ -260,6 +405,14 @@ std::optional<int> ObjectInteger(const picojson::object& object, std::string_vie
     return std::nullopt;
   }
   return static_cast<int>(value);
+}
+
+std::optional<double> ObjectNumber(const picojson::object& object, std::string_view key)
+{
+  const auto it = object.find(std::string{key});
+  if (it == object.end() || !it->second.is<double>())
+    return std::nullopt;
+  return it->second.get<double>();
 }
 
 const picojson::object* ParseJsonObject(std::span<const u8> body, picojson::value* storage)
@@ -335,6 +488,46 @@ std::optional<Revision> ParseRevision(const picojson::value& value)
   return revision;
 }
 
+std::optional<Binding> ParseBinding(const picojson::value& value)
+{
+  if (!value.is<picojson::object>())
+    return std::nullopt;
+
+  const auto& object = value.get<picojson::object>();
+  if (ObjectString(object, "driver").value_or("") != "dolphin")
+    return std::nullopt;
+
+  Binding binding;
+  binding.id = ObjectString(object, "id").value_or("");
+  binding.relative_path = ObjectString(object, "relative_path").value_or("");
+  binding.game_id = ObjectString(object, "game_id").value_or("");
+  binding.sync_mode = ObjectString(object, "sync_mode").value_or("two_way");
+  binding.status = ObjectString(object, "status").value_or("");
+
+  const auto revision_it = object.find("current_revision");
+  if (revision_it != object.end() && !revision_it->second.is<picojson::null>())
+  {
+    binding.current_revision = ParseRevision(revision_it->second);
+    if (!binding.current_revision)
+      return std::nullopt;
+  }
+
+  const auto conflict_revision_it = object.find("conflict_revision");
+  if (conflict_revision_it != object.end() && !conflict_revision_it->second.is<picojson::null>())
+  {
+    binding.conflict_revision = ParseRevision(conflict_revision_it->second);
+    if (!binding.conflict_revision)
+      return std::nullopt;
+  }
+
+  if (!IsSafeIdentifier(binding.id) || binding.relative_path.empty() ||
+      (!binding.game_id.empty() && !IsSafeGameIdentifier(binding.game_id)))
+  {
+    return std::nullopt;
+  }
+  return binding;
+}
+
 std::optional<Manifest> ParseManifest(std::span<const u8> body)
 {
   picojson::value root;
@@ -354,30 +547,9 @@ std::optional<Manifest> ParseManifest(std::span<const u8> body)
   Manifest manifest;
   for (const picojson::value& value : bindings_it->second.get<picojson::array>())
   {
-    if (!value.is<picojson::object>())
-      continue;
-
-    const auto& object = value.get<picojson::object>();
-    if (ObjectString(object, "driver").value_or("") != "dolphin")
-      continue;
-
-    Binding binding;
-    binding.id = ObjectString(object, "id").value_or("");
-    binding.relative_path = ObjectString(object, "relative_path").value_or("");
-    binding.sync_mode = ObjectString(object, "sync_mode").value_or("two_way");
-    binding.status = ObjectString(object, "status").value_or("");
-
-    const auto revision_it = object.find("current_revision");
-    if (revision_it != object.end())
-      binding.current_revision = ParseRevision(revision_it->second);
-
-    const auto conflict_revision_it = object.find("conflict_revision");
-    if (conflict_revision_it != object.end())
-      binding.conflict_revision = ParseRevision(conflict_revision_it->second);
-
-    if (!IsSafeIdentifier(binding.id) || binding.relative_path.empty())
-      continue;
-    manifest.bindings.emplace_back(std::move(binding));
+    auto binding = ParseBinding(value);
+    if (binding)
+      manifest.bindings.emplace_back(std::move(*binding));
   }
 
   return manifest;
@@ -452,8 +624,7 @@ std::optional<std::string> ResolveSavePath(std::string relative_path)
   std::error_code error;
   const bool is_gamecube = Common::CaseInsensitiveEquals(components.front(), "GC");
   const int root_index = is_gamecube ? D_GCUSER_IDX : D_WIIROOT_IDX;
-  const fs::path root =
-      fs::weakly_canonical(StringToPath(File::GetUserPath(root_index)), error);
+  const fs::path root = fs::weakly_canonical(StringToPath(File::GetUserPath(root_index)), error);
   if (error)
     return std::nullopt;
 
@@ -514,6 +685,141 @@ std::optional<FileSnapshot> ReadSaveFile(const std::string& path)
   return snapshot;
 }
 
+std::optional<std::string> MakeGameCubeRelativePath(const std::string& absolute_path)
+{
+  namespace fs = std::filesystem;
+  std::error_code error;
+  const fs::path root = fs::weakly_canonical(StringToPath(File::GetUserPath(D_GCUSER_IDX)), error);
+  if (error)
+    return std::nullopt;
+
+  const fs::path candidate = fs::weakly_canonical(StringToPath(absolute_path), error);
+  if (error)
+    return std::nullopt;
+
+  const fs::path relative = candidate.lexically_relative(root);
+  if (relative.empty() || relative.is_absolute())
+    return std::nullopt;
+  for (const fs::path& component : relative)
+  {
+    const std::string name = PathToString(component);
+    if (component.empty() || component == "." || component == ".." ||
+        name.find(':') != std::string::npos || std::ranges::any_of(name, [](const char c) {
+          const auto byte = static_cast<unsigned char>(c);
+          return byte < 0x20 || byte == 0x7f;
+        }))
+    {
+      return std::nullopt;
+    }
+  }
+
+  std::string result = "GC/" + PathToString(relative);
+  std::ranges::replace(result, '\\', '/');
+  if (result.size() > 255)
+    return std::nullopt;
+  return result;
+}
+
+bool ValidateGciContents(std::span<const u8> contents, std::string_view game_id = {})
+{
+  if (contents.size() < Memcard::DENTRY_SIZE)
+    return false;
+
+  Memcard::DEntry entry;
+  std::memcpy(&entry, contents.data(), sizeof(entry));
+  const u16 block_count = entry.m_block_count;
+  if (block_count == 0 || block_count > 2043 ||
+      contents.size() !=
+          Memcard::DENTRY_SIZE + static_cast<size_t>(block_count) * Memcard::BLOCK_SIZE)
+  {
+    return false;
+  }
+
+  if (game_id.empty())
+    return true;
+  if (!IsDolphinGameId(game_id))
+    return false;
+
+  return std::equal(entry.m_gamecode.begin(), entry.m_gamecode.end(), game_id.begin()) &&
+         std::equal(entry.m_makercode.begin(), entry.m_makercode.end(), game_id.begin() + 4);
+}
+
+std::optional<GameIdentity> CaptureGameCubeIdentity()
+{
+  const Core::System& system = Core::System::GetInstance();
+  if (system.IsWii() || system.IsTriforce())
+    return std::nullopt;
+
+  const SConfig& config = SConfig::GetInstance();
+  GameIdentity game;
+  game.platform = "gamecube";
+  game.game_id = config.GetGameID();
+  Common::ToUpper(&game.game_id);
+  if (!IsDolphinGameId(game.game_id))
+    return std::nullopt;
+
+  game.title = Trim(config.GetTitleName());
+  if (game.title.empty())
+    game.title = Trim(config.GetTitleDescription());
+  if (game.title.empty())
+    game.title = game.game_id;
+  game.region = Config::GetDirectoryForRegion(Config::ToGameCubeRegion(config.m_region));
+  game.revision = config.GetRevision();
+  return game;
+}
+
+std::vector<SaveLocation> DiscoverGameCubeGciSaves(const GameIdentity& game)
+{
+  namespace fs = std::filesystem;
+  std::vector<SaveLocation> locations;
+  std::set<std::string, std::less<>> seen_directories;
+  const SConfig& config = SConfig::GetInstance();
+
+  for (const ExpansionInterface::Slot slot : ExpansionInterface::MEMCARD_SLOTS)
+  {
+    if (Config::Get(Config::GetInfoForEXIDevice(slot)) !=
+        ExpansionInterface::EXIDeviceType::MemoryCardFolder)
+    {
+      continue;
+    }
+
+    SaveLocation location;
+    location.absolute_directory = Config::GetGCIFolderPath(slot, config.m_region);
+    const auto relative_directory = MakeGameCubeRelativePath(location.absolute_directory);
+    if (!relative_directory || !seen_directories.insert(*relative_directory).second)
+      continue;
+    location.relative_directory = *relative_directory;
+
+    std::error_code error;
+    const fs::path directory =
+        fs::weakly_canonical(StringToPath(location.absolute_directory), error);
+    if (error)
+      continue;
+
+    for (const std::string& filename :
+         GCMemcardDirectory::GetFileNamesForGameID(location.absolute_directory, game.game_id))
+    {
+      const fs::path candidate = fs::weakly_canonical(StringToPath(filename), error);
+      if (error || candidate.parent_path() != directory)
+        continue;
+
+      const auto relative_path = MakeGameCubeRelativePath(filename);
+      auto snapshot = ReadSaveFile(filename);
+      if (!relative_path || !snapshot || !ValidateGciContents(snapshot->contents, game.game_id) ||
+          !ResolveSavePath(*relative_path))
+      {
+        continue;
+      }
+
+      location.files.emplace_back(
+          LocalSaveCandidate{filename, *relative_path, std::move(*snapshot)});
+    }
+    locations.emplace_back(std::move(location));
+  }
+
+  return locations;
+}
+
 bool WriteAtomically(const std::string& path, std::span<const u8> contents)
 {
   if (!File::CreateFullPath(path))
@@ -544,12 +850,12 @@ public:
   Manager()
   {
     LoadState();
+    m_last_sync_config = ReadSyncConfig();
     m_state_changed_hook = Core::AddOnStateChangedCallback(
         [this](Core::State state) { OnEmulationStateChanged(state); });
     m_save_data_changed_hook = Core::AddOnSaveDataChangedCallback([this] { OnSaveDataChanged(); });
-    m_savestate_loaded_hook =
-        Core::AddOnSavestateLoadedCallback([this] { OnSavestateLoaded(); });
-    m_config_changed_callback = Config::AddConfigChangedCallback([this] { Request(); });
+    m_savestate_loaded_hook = Core::AddOnSavestateLoadedCallback([this] { OnSavestateLoaded(); });
+    m_config_changed_callback = Config::AddConfigChangedCallback([this] { OnConfigChanged(); });
     m_worker = std::thread([this] { WorkerLoop(); });
     Request();
   }
@@ -594,20 +900,26 @@ public:
       SyncOnce(SyncMode::Idle);
   }
 
-  void Request()
+  u64 Request(bool user_initiated = false)
   {
     if (m_shutdown.load(std::memory_order_acquire))
-      return;
+      return 0;
 
+    u64 generation = 0;
     {
       std::lock_guard lock(m_wake_mutex);
       if (m_stop)
-        return;
+        return 0;
       m_sync_requested = true;
-      ++m_requested_generation;
+      generation = ++m_requested_generation;
     }
+    if (user_initiated)
+      SetStatus("EmuBank sync queued…");
     m_wake_condition.notify_all();
+    return generation;
   }
+
+  bool IsSyncing() const { return m_is_syncing.load(std::memory_order_acquire); }
 
   bool SyncAndWait(std::chrono::milliseconds timeout)
   {
@@ -618,9 +930,17 @@ public:
     if (m_stop)
       return false;
 
-    const u64 target_generation = ++m_requested_generation;
-    m_sync_requested = true;
-    m_wake_condition.notify_all();
+    // State::Uninitialized always records the generation for this game's final pass. Wait for that
+    // pass even if it completed before Android reached this function; do not turn a fast shutdown
+    // into a second complete manifest/hash pass.
+    u64 target_generation = m_final_sync_generation.load(std::memory_order_acquire);
+    target_generation = std::max(target_generation, m_requested_generation);
+    if (target_generation == 0)
+    {
+      target_generation = ++m_requested_generation;
+      m_sync_requested = true;
+      m_wake_condition.notify_all();
+    }
     return m_sync_finished_condition.wait_for(lock, timeout,
                                               [this, target_generation] {
                                                 return m_stop ||
@@ -672,9 +992,8 @@ public:
     SetStatus("Contacting EmuBank to start device authorization…");
 
     std::string validation_error;
-    auto base_url =
-        NormalizeServerUrl(std::move(server_url),
-                           Config::Get(Config::MAIN_EMUBANK_ALLOW_INSECURE), &validation_error);
+    auto base_url = NormalizeServerUrl(
+        std::move(server_url), Config::Get(Config::MAIN_EMUBANK_ALLOW_INSECURE), &validation_error);
     if (!base_url)
       return FailPairing(std::move(validation_error));
 
@@ -701,6 +1020,9 @@ public:
             {"platform", picojson::value{platform}},
             {"credential_hash", picojson::value{credential_hash}},
             {"credential_hint", picojson::value{local_secret.substr(local_secret.size() - 6)}},
+            {"capabilities", picojson::value{picojson::array{
+                                 picojson::value{"save_sync"}, picojson::value{"binding_discovery"},
+                                 picojson::value{"library_onboarding"}}}},
         }}.serialize();
 
     Common::HttpRequest request(HTTP_TIMEOUT,
@@ -793,13 +1115,20 @@ private:
       m_paired_device_name.clear();
     }
 
-    Config::ConfigChangeCallbackGuard guard;
-    Config::SetBase(Config::MAIN_EMUBANK_SERVER_URL, base_url);
-    Config::SetBase(Config::MAIN_EMUBANK_DEVICE_TOKEN, token);
-    Config::SetBase(Config::MAIN_EMUBANK_ENABLED, true);
-    Config::Save();
+    {
+      Config::ConfigChangeCallbackGuard guard;
+      Config::SetBase(Config::MAIN_EMUBANK_SERVER_URL, base_url);
+      Config::SetBase(Config::MAIN_EMUBANK_DEVICE_TOKEN, token);
+      Config::SetBase(Config::MAIN_EMUBANK_ENABLED, true);
+      Config::Save();
+      {
+        std::lock_guard lock(m_config_snapshot_mutex);
+        m_last_sync_config = ReadSyncConfig();
+      }
+    }
     SetStatus(fmt::format("EmuBank authorized{}; syncing device bindings…",
                           device_name.empty() ? "" : " as " + device_name));
+    Request();
     return true;
   }
 
@@ -932,10 +1261,28 @@ private:
     Request();
   }
 
+  void OnConfigChanged()
+  {
+    const SyncConfig next = ReadSyncConfig();
+    {
+      std::lock_guard lock(m_config_snapshot_mutex);
+      if (next == m_last_sync_config)
+        return;
+      m_last_sync_config = next;
+    }
+    Request();
+  }
+
   void OnEmulationStateChanged(Core::State state)
   {
     if (state == Core::State::Starting)
     {
+      m_final_sync_generation.store(0, std::memory_order_release);
+      {
+        std::lock_guard lock(m_active_game_mutex);
+        m_active_game = CaptureGameCubeIdentity();
+        m_resolved_save_paths.clear();
+      }
       m_emulation_active = true;
       SyncOnce(SyncMode::BeforeLaunch);
     }
@@ -947,7 +1294,7 @@ private:
     else if (state == Core::State::Uninitialized)
     {
       m_emulation_active = false;
-      Request();
+      m_final_sync_generation.store(Request(), std::memory_order_release);
     }
   }
 
@@ -956,15 +1303,20 @@ private:
     Common::SetCurrentThreadName("EmuBank Sync");
     while (true)
     {
-      const int interval = std::clamp(Config::Get(Config::MAIN_EMUBANK_SYNC_INTERVAL), 5, 300);
-      const bool periodic_sync_enabled =
+      const int interval = std::clamp(Config::Get(Config::MAIN_EMUBANK_SYNC_INTERVAL), 30, 300);
+      const bool emulation_active = m_emulation_active.load(std::memory_order_acquire);
+      const bool automatic_sync_enabled =
           Config::Get(Config::MAIN_EMUBANK_ENABLED) &&
-          (!m_emulation_active || Config::Get(Config::MAIN_EMUBANK_LIVE_SYNC));
-      const auto live_retry = periodic_sync_enabled ? TimeUntilPendingLiveUploadReady() :
-                                                      std::optional<std::chrono::milliseconds>{};
+          (!emulation_active || Config::Get(Config::MAIN_EMUBANK_LIVE_SYNC));
+      // Save events drive live uploads. Polling the manifest and hashing every bound save while a
+      // game is idle wastes battery and I/O; periodic checks are only needed while files are
+      // closed.
+      const bool periodic_sync_enabled = automatic_sync_enabled && !emulation_active;
+      const auto live_retry = automatic_sync_enabled ? TimeUntilPendingLiveUploadReady() :
+                                                       std::optional<std::chrono::milliseconds>{};
       std::unique_lock lock(m_wake_mutex);
       bool should_sync = false;
-      if (periodic_sync_enabled)
+      if (automatic_sync_enabled)
       {
         const bool save_sync_due =
             m_save_sync_deadline && std::chrono::steady_clock::now() >= *m_save_sync_deadline;
@@ -974,21 +1326,36 @@ private:
         }
         else
         {
-          auto wait_duration =
-              std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::seconds{interval});
+          std::optional<std::chrono::milliseconds> wait_duration;
+          if (periodic_sync_enabled)
+          {
+            wait_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::seconds{interval});
+          }
           if (live_retry)
-            wait_duration = std::min(wait_duration, *live_retry);
+            wait_duration = wait_duration ? std::min(*wait_duration, *live_retry) : *live_retry;
           if (m_save_sync_deadline)
           {
             const auto until_save_sync =
                 std::max(1ms, std::chrono::duration_cast<std::chrono::milliseconds>(
                                   *m_save_sync_deadline - std::chrono::steady_clock::now()));
-            wait_duration = std::min(wait_duration, until_save_sync);
+            wait_duration =
+                wait_duration ? std::min(*wait_duration, until_save_sync) : until_save_sync;
           }
-          const auto wait_result = m_wake_condition.wait_for(lock, wait_duration);
-          const bool save_sync_now =
-              m_save_sync_deadline && std::chrono::steady_clock::now() >= *m_save_sync_deadline;
-          should_sync = m_sync_requested || wait_result == std::cv_status::timeout || save_sync_now;
+
+          if (wait_duration)
+          {
+            const auto wait_result = m_wake_condition.wait_for(lock, *wait_duration);
+            const bool save_sync_now =
+                m_save_sync_deadline && std::chrono::steady_clock::now() >= *m_save_sync_deadline;
+            should_sync =
+                m_sync_requested || wait_result == std::cv_status::timeout || save_sync_now;
+          }
+          else
+          {
+            m_wake_condition.wait(lock);
+            should_sync = m_sync_requested;
+          }
         }
         if (m_save_sync_deadline && std::chrono::steady_clock::now() >= *m_save_sync_deadline)
           m_save_sync_deadline.reset();
@@ -1100,9 +1467,342 @@ private:
                        connection.device_id, binding.id);
   }
 
+  ResolveResult ResolveBinding(const Connection& connection, const GameIdentity& game,
+                               const SaveLocation& location, const LocalSaveCandidate* local_save)
+  {
+    picojson::object local_save_object{
+        {"kind", picojson::value{"memory_card"}},
+        {"file_format", picojson::value{"gci"}},
+        {"exists", picojson::value{local_save != nullptr}},
+    };
+    if (local_save)
+    {
+      local_save_object.emplace("sha256", picojson::value{local_save->snapshot.sha256});
+      local_save_object.emplace(
+          "size_bytes", picojson::value{static_cast<double>(local_save->snapshot.contents.size())});
+    }
+
+    const picojson::value relative_path =
+        local_save ? picojson::value{local_save->relative_path} : picojson::value{};
+    const std::string body = picojson::value{
+        picojson::object{
+            {"version", picojson::value{1.0}},
+            {"relative_path", relative_path},
+            {"relative_directory", picojson::value{location.relative_directory}},
+            {"game", picojson::value{picojson::object{
+                         {"platform", picojson::value{game.platform}},
+                         {"game_id", picojson::value{game.game_id}},
+                         {"title", picojson::value{game.title}},
+                         {"region", picojson::value{game.region}},
+                         {"revision", picojson::value{static_cast<double>(game.revision)}},
+                     }}},
+            {"local_save", picojson::value{std::move(local_save_object)}},
+            {"create_if_missing", picojson::value{true}},
+        }}.serialize();
+
+    auto headers = Headers(connection);
+    headers["Content-Type"] = "application/json";
+    Common::HttpRequest request(
+        HttpTimeoutUntil(m_sync_deadline),
+        LimitTransfer(MAX_BINDING_RESOLUTION_RESPONSE_SIZE, body.size(), m_sync_deadline));
+    const auto response = request.Post(fmt::format("{}/api/v1/devices/{}/bindings/resolve",
+                                                   connection.base_url, connection.device_id),
+                                       body, headers, Common::HttpRequest::AllowedReturnCodes::All);
+    if (!response)
+    {
+      return {.disposition = ResolveDisposition::RetryableFailure,
+              .message = fmt::format("EmuBank could not look up the save for {}.", game.title)};
+    }
+
+    const s32 response_code = request.GetLastResponseCode();
+    if (response_code != 200 && response_code != 201)
+    {
+      picojson::value root;
+      const picojson::object* root_object = ParseJsonObject(*response, &root);
+      const picojson::object* error_object =
+          root_object ? ObjectValue(*root_object, "error") : nullptr;
+      const std::string error_code =
+          error_object ? ObjectString(*error_object, "code").value_or("") : "";
+
+      std::string message;
+      if (response_code == 401)
+      {
+        message = "EmuBank rejected this Dolphin installation. Reconnect it in EmuBank settings.";
+      }
+      else if (response_code == 403 && error_code == "capability_required")
+      {
+        message = "Reconnect this Dolphin installation to approve automatic EmuBank game and save "
+                  "discovery.";
+      }
+      else if (response_code == 404 && error_code == "save_file_not_found")
+      {
+        message = "EmuBank could not find the selected save. Choose it again in Devices & Sync.";
+      }
+      else if (response_code == 404)
+      {
+        message = "This EmuBank server does not support automatic Dolphin save linking yet. "
+                  "Update the server and try again.";
+      }
+      else if (response_code == 409 && error_code == "selection_required")
+      {
+        message = fmt::format("EmuBank found multiple saves for {}. Choose one in Devices & Sync.",
+                              game.title);
+      }
+      else if (response_code == 409 && error_code == "path_already_bound")
+      {
+        message = "This Dolphin save path is linked to another EmuBank game. Review it in Devices "
+                  "& Sync.";
+      }
+      else if (response_code == 409 && error_code == "save_format_incompatible")
+      {
+        message = "EmuBank cannot connect an individual GCI save to a raw memory-card save.";
+      }
+      else if (response_code == 422 && !local_save)
+      {
+        message = fmt::format("No cloud save is linked for {} yet. Dolphin will link it after the "
+                              "game creates a save.",
+                              game.title);
+      }
+      else
+      {
+        message =
+            fmt::format("EmuBank could not safely link {} (HTTP {}).", game.title, response_code);
+      }
+
+      return {.disposition = ResolveDisposition::ActionRequired, .message = std::move(message)};
+    }
+
+    picojson::value root;
+    const picojson::object* root_object = ParseJsonObject(*response, &root);
+    const picojson::object* data = root_object ? ObjectValue(*root_object, "data") : nullptr;
+    if (!root_object || !ReadBoolFromJson(*root_object, "ok").value_or(false) || !data)
+    {
+      return {.disposition = ResolveDisposition::RetryableFailure,
+              .message = "EmuBank returned an invalid game-link response."};
+    }
+
+    ResolveResult result;
+    result.disposition = ResolveDisposition::Resolved;
+    result.status = ObjectString(*data, "status").value_or("");
+    result.next_action = ObjectString(*data, "next_action").value_or("");
+    const picojson::object* match = ObjectValue(*data, "match");
+    if (match)
+    {
+      result.match_method = ObjectString(*match, "method").value_or("");
+      result.match_confidence = ObjectNumber(*match, "confidence").value_or(-1.0);
+    }
+
+    static const std::set<std::string, std::less<>> VALID_STATUSES = {
+        "already_bound", "bound_existing", "created", "matched_existing"};
+    static const std::set<std::string, std::less<>> VALID_NEXT_ACTIONS = {
+        "none", "download", "upload", "wait_for_local_save", "reconcile"};
+    if (!VALID_STATUSES.contains(result.status) ||
+        !VALID_NEXT_ACTIONS.contains(result.next_action) || result.match_method.empty() ||
+        result.match_confidence < 0.0 || result.match_confidence > 1.0)
+    {
+      return {.disposition = ResolveDisposition::RetryableFailure,
+              .message = "EmuBank returned an invalid game-link response."};
+    }
+
+    const auto binding_it = data->find("binding");
+    if (binding_it == data->end())
+    {
+      return {.disposition = ResolveDisposition::RetryableFailure,
+              .message = "EmuBank returned an invalid game-link response."};
+    }
+    if (!binding_it->second.is<picojson::null>())
+      result.binding = ParseBinding(binding_it->second);
+
+    if (!result.binding)
+    {
+      if (!binding_it->second.is<picojson::null>() || result.next_action != "wait_for_local_save" ||
+          local_save)
+      {
+        return {.disposition = ResolveDisposition::RetryableFailure,
+                .message = "EmuBank returned an invalid game-link response."};
+      }
+      result.message = fmt::format("EmuBank recognized {} and will link it after the game creates "
+                                   "a local save.",
+                                   game.title);
+      return result;
+    }
+
+    if (result.match_confidence < 0.8)
+    {
+      return {.disposition = ResolveDisposition::ActionRequired,
+              .message = fmt::format("EmuBank needs confirmation before linking the save for {}. "
+                                     "Review it in Devices & Sync.",
+                                     game.title)};
+    }
+
+    Binding& binding = *result.binding;
+    if (binding.game_id != game.game_id || !ResolveSavePath(binding.relative_path))
+    {
+      return {.disposition = ResolveDisposition::RetryableFailure,
+              .message = "EmuBank returned a save link for the wrong game or an unsafe path."};
+    }
+
+    std::string lowercase_path = binding.relative_path;
+    Common::ToLower(&lowercase_path);
+    if (!lowercase_path.ends_with(".gci"))
+    {
+      return {.disposition = ResolveDisposition::RetryableFailure,
+              .message = "EmuBank returned a non-GCI path for an individual GameCube save."};
+    }
+
+    if (local_save)
+    {
+      if (binding.relative_path != local_save->relative_path)
+      {
+        return {.disposition = ResolveDisposition::RetryableFailure,
+                .message = "EmuBank returned a different path than Dolphin's active save."};
+      }
+    }
+    else
+    {
+      const size_t separator = binding.relative_path.find_last_of('/');
+      const std::string_view parent =
+          separator == std::string::npos ?
+              std::string_view{} :
+              std::string_view{binding.relative_path}.substr(0, separator);
+      if (parent != location.relative_directory || result.next_action != "download" ||
+          !binding.current_revision)
+      {
+        return {.disposition = ResolveDisposition::RetryableFailure,
+                .message = "EmuBank did not provide a trustworthy cloud GCI path for this game."};
+      }
+    }
+
+    return result;
+  }
+
+  std::string ResolveActiveGame(const Connection& connection, SyncMode mode)
+  {
+    std::optional<GameIdentity> game;
+    {
+      std::lock_guard lock(m_active_game_mutex);
+      game = m_active_game;
+    }
+    if (!game)
+      return {};
+
+    const std::vector<SaveLocation> locations = DiscoverGameCubeGciSaves(*game);
+    if (locations.empty())
+    {
+      const std::string message =
+          fmt::format("EmuBank automatic linking for {} needs a GCI Folder memory card inside "
+                      "Dolphin's GC save folder.",
+                      game->title);
+      SetStatus(message);
+      if (mode == SyncMode::BeforeLaunch)
+        DisplaySyncMessage("EmuBank: active save is not an accessible GCI Folder", 6000,
+                           OsdTone::Warning);
+      return message;
+    }
+
+    size_t local_file_count = 0;
+    for (const SaveLocation& location : locations)
+      local_file_count += location.files.size();
+
+    // A GameCube title can own multiple independent GCI entries. The v1 resolver does not yet
+    // carry the internal GCI filename needed to prove which cloud SaveFile each entry belongs to;
+    // auto-linking all of them by game ID would collapse distinct saves into one revision stream.
+    if (local_file_count > 1)
+    {
+      const std::string message = fmt::format(
+          "EmuBank found {} local save entries for {}. Existing links will still sync, but "
+          "automatic linking needs a per-save choice in Devices & Sync.",
+          local_file_count, game->title);
+      WARN_LOG_FMT(CORE, "EmuBank: {}", message);
+      SetStatus(message);
+      DisplaySyncMessage("EmuBank found multiple saves; choose one in Devices & Sync", 7000,
+                         OsdTone::Warning);
+      return message;
+    }
+
+    DisplaySyncMessage(fmt::format("EmuBank: finding {} save for {}...",
+                                   local_file_count == 0 ? "cloud" : "the matching", game->title),
+                       3000);
+
+    std::string notice;
+    const auto process_result = [&](const ResolveResult& result) {
+      if (result.disposition != ResolveDisposition::Resolved)
+      {
+        if (!result.message.empty())
+        {
+          WARN_LOG_FMT(CORE, "EmuBank: active-game binding resolution: {}", result.message);
+          notice = result.message;
+          SetStatus(result.message);
+          DisplaySyncMessage(result.message, 7000,
+                             result.disposition == ResolveDisposition::ActionRequired ?
+                                 OsdTone::Warning :
+                                 OsdTone::Error);
+        }
+        return;
+      }
+
+      if (!result.binding)
+      {
+        INFO_LOG_FMT(CORE, "EmuBank: {}", result.message);
+        notice = result.message;
+        SetStatus(result.message);
+        DisplaySyncMessage(result.message, 6000);
+        return;
+      }
+      INFO_LOG_FMT(CORE,
+                   "EmuBank: resolved active-game binding '{}' by {} (confidence {:.2f}); next "
+                   "action is {}",
+                   result.binding->relative_path, result.match_method, result.match_confidence,
+                   result.next_action);
+      {
+        std::lock_guard lock(m_active_game_mutex);
+        m_resolved_save_paths.insert(result.binding->relative_path);
+      }
+
+      if (result.next_action == "download")
+        DisplaySyncMessage("EmuBank: cloud save found; restoring before launch...", 3500);
+      else if (result.next_action == "upload")
+        DisplaySyncMessage("EmuBank: save linked; preparing cloud backup...", 3500);
+      else if (result.next_action == "reconcile")
+        DisplaySyncMessage("EmuBank: local and cloud saves found; comparing safely...", 3500,
+                           OsdTone::Warning);
+      else
+        DisplaySyncMessage("EmuBank: save link is current", 2500, OsdTone::Success);
+    };
+
+    if (local_file_count == 0)
+    {
+      // Before launch this can restore an existing cloud GCI. After shutdown it also covers a
+      // first-time game that never produced a local save or whose launch-time lookup was offline.
+      // Live passes wait for the pathless save notification to reveal Dolphin's real GCI leaf.
+      if (mode != SyncMode::Live)
+        process_result(ResolveBinding(connection, *game, locations.front(), nullptr));
+      return notice;
+    }
+
+    for (const SaveLocation& location : locations)
+    {
+      for (const LocalSaveCandidate& candidate : location.files)
+      {
+        if (std::chrono::steady_clock::now() >= m_sync_deadline)
+          return notice;
+
+        bool already_resolved = false;
+        {
+          std::lock_guard lock(m_active_game_mutex);
+          already_resolved = m_resolved_save_paths.contains(candidate.relative_path);
+        }
+        if (!already_resolved)
+          process_result(ResolveBinding(connection, *game, location, &candidate));
+      }
+    }
+    return notice;
+  }
+
   std::optional<Manifest> FetchManifest(const Connection& connection)
   {
-    Common::HttpRequest request(HTTP_TIMEOUT, LimitTransfer(MAX_SAVE_SIZE, 0, m_sync_deadline));
+    Common::HttpRequest request(HttpTimeoutUntil(m_sync_deadline),
+                                LimitTransfer(MAX_MANIFEST_RESPONSE_SIZE, 0, m_sync_deadline));
     const std::string url =
         fmt::format("{}/api/v1/devices/{}/manifest", connection.base_url, connection.device_id);
     const auto response =
@@ -1110,29 +1810,37 @@ private:
     if (!response)
     {
       SetStatus("EmuBank server could not be reached.");
+      DisplaySyncMessage("EmuBank could not reach the server", 5000, OsdTone::Error);
       return std::nullopt;
     }
     if (request.GetLastResponseCode() == 401)
     {
       SetStatus("EmuBank rejected the device token.");
+      DisplaySyncMessage("EmuBank authorization was rejected", 5000, OsdTone::Error);
       return std::nullopt;
     }
     if (request.GetLastResponseCode() != 200)
     {
       SetStatus(fmt::format("EmuBank manifest failed (HTTP {}).", request.GetLastResponseCode()));
+      DisplaySyncMessage("EmuBank could not check cloud saves", 5000, OsdTone::Error);
       return std::nullopt;
     }
 
     auto manifest = ParseManifest(*response);
     if (!manifest)
+    {
       SetStatus("EmuBank returned an invalid device manifest.");
+      DisplaySyncMessage("EmuBank returned an invalid save list", 5000, OsdTone::Error);
+    }
     return manifest;
   }
 
   bool Download(const Connection& connection, const Binding& binding, const Revision& revision,
                 const std::string& path, SyncStats* stats, bool preserve_conflict = false)
   {
-    Common::HttpRequest request(HTTP_TIMEOUT, LimitTransfer(MAX_SAVE_SIZE, 0, m_sync_deadline));
+    SetStatus(fmt::format("EmuBank is downloading {}…", BindingDisplayName(binding.relative_path)));
+    Common::HttpRequest request(HttpTimeoutUntil(m_sync_deadline),
+                                LimitTransfer(MAX_SAVE_SIZE, 0, m_sync_deadline));
     const auto response =
         request.Get(BindingUrl(connection, binding) + "/download", Headers(connection),
                     Common::HttpRequest::AllowedReturnCodes::All);
@@ -1141,6 +1849,9 @@ private:
       ERROR_LOG_FMT(CORE, "EmuBank: failed to download '{}' (HTTP {})", binding.relative_path,
                     request.GetLastResponseCode());
       ++stats->errors;
+      DisplaySyncMessage(
+          fmt::format("EmuBank failed to download {}", BindingDisplayName(binding.relative_path)),
+          5000, OsdTone::Error);
       return false;
     }
 
@@ -1154,6 +1865,21 @@ private:
         CalculateSha256(*response) != downloaded_revision.sha256)
     {
       ERROR_LOG_FMT(CORE, "EmuBank: rejected invalid download for '{}'", binding.relative_path);
+      ++stats->errors;
+      return false;
+    }
+
+    std::string lowercase_path = binding.relative_path;
+    Common::ToLower(&lowercase_path);
+    if (lowercase_path.ends_with(".gci") && !ValidateGciContents(*response, binding.game_id))
+    {
+      ERROR_LOG_FMT(CORE,
+                    "EmuBank: rejected structurally invalid or wrong-game GCI download for '{}'",
+                    binding.relative_path);
+      SetStatus(fmt::format("EmuBank refused a wrong-game or invalid GCI save for {}.",
+                            BindingDisplayName(binding.relative_path)));
+      DisplaySyncMessage("EmuBank refused an invalid or wrong-game cloud GCI", 6000,
+                         OsdTone::Error);
       ++stats->errors;
       return false;
     }
@@ -1183,6 +1909,9 @@ private:
     }
     m_pending_uploads.erase(binding.id);
     ++stats->downloaded;
+    DisplaySyncMessage(
+        fmt::format("EmuBank restored {}", BindingDisplayName(binding.relative_path)), 4000,
+        OsdTone::Success);
     INFO_LOG_FMT(CORE, "EmuBank: downloaded '{}' at revision {}", binding.relative_path,
                  downloaded_revision.id);
     if (revision.id != downloaded_revision.id)
@@ -1214,13 +1943,21 @@ private:
     headers["X-EmuBank-Filename"] =
         binding.relative_path.substr(binding.relative_path.find_last_of("/\\") + 1);
 
+    SetStatus(fmt::format("EmuBank is uploading {}…", BindingDisplayName(binding.relative_path)));
+    DisplaySyncMessage(
+        fmt::format("EmuBank: backing up {}...", BindingDisplayName(binding.relative_path)), 3000);
+
     Common::HttpRequest request(
-        HTTP_TIMEOUT, LimitTransfer(MAX_SAVE_SIZE, snapshot.contents.size(), m_sync_deadline));
+        HttpTimeoutUntil(m_sync_deadline),
+        LimitTransfer(MAX_SAVE_SIZE, snapshot.contents.size(), m_sync_deadline));
     const auto response = request.Post(BindingUrl(connection, binding), snapshot.contents, headers,
                                        Common::HttpRequest::AllowedReturnCodes::All);
     if (!response)
     {
       ++stats->errors;
+      DisplaySyncMessage(
+          fmt::format("EmuBank failed to upload {}", BindingDisplayName(binding.relative_path)),
+          5000, OsdTone::Error);
       return UploadResult::Failed;
     }
     if (request.GetLastResponseCode() == 409)
@@ -1239,6 +1976,9 @@ private:
                    "EmuBank: '{}' changed locally and in the cloud; the local copy was retained "
                    "as a conflict revision",
                    binding.relative_path);
+      DisplaySyncMessage(fmt::format("EmuBank kept a conflict copy of {}",
+                                     BindingDisplayName(binding.relative_path)),
+                         6000, OsdTone::Warning);
       return UploadResult::Conflict;
     }
     if (request.GetLastResponseCode() != 200)
@@ -1246,6 +1986,9 @@ private:
       ERROR_LOG_FMT(CORE, "EmuBank: failed to upload '{}' (HTTP {})", binding.relative_path,
                     request.GetLastResponseCode());
       ++stats->errors;
+      DisplaySyncMessage(
+          fmt::format("EmuBank failed to upload {}", BindingDisplayName(binding.relative_path)),
+          5000, OsdTone::Error);
       return UploadResult::Failed;
     }
 
@@ -1261,6 +2004,9 @@ private:
     UpdateState(binding.id, snapshot.sha256, revision->id);
     m_pending_uploads.erase(binding.id);
     ++stats->uploaded;
+    DisplaySyncMessage(
+        fmt::format("EmuBank backed up {}", BindingDisplayName(binding.relative_path)), 4000,
+        OsdTone::Success);
     INFO_LOG_FMT(CORE, "EmuBank: uploaded '{}' as revision {}", binding.relative_path,
                  revision->id);
     return UploadResult::Success;
@@ -1402,11 +2148,11 @@ private:
 
       if (can_upload && ReadyForLiveUpload(binding, *local, mode, stats))
       {
-        const std::string_view expected = state_it->second.ancestor_invalidated ?
-                                              ZERO_SHA256 :
-                                              (IsSha256(state_it->second.base_sha256) ?
-                                                   state_it->second.base_sha256 :
-                                                   ZERO_SHA256);
+        const std::string_view expected =
+            state_it->second.ancestor_invalidated ?
+                ZERO_SHA256 :
+                (IsSha256(state_it->second.base_sha256) ? state_it->second.base_sha256 :
+                                                          ZERO_SHA256);
         UploadAndRestoreCloudForLaunch(connection, binding, *local, expected, &cloud, *path, mode,
                                        stats);
       }
@@ -1593,17 +2339,58 @@ private:
 
   void SyncOnce(SyncMode mode)
   {
-    std::lock_guard operation_lock(m_sync_mutex);
-    m_sync_deadline = std::chrono::steady_clock::now() + SYNC_OPERATION_TIMEOUT;
+    const auto deadline =
+        std::chrono::steady_clock::now() +
+        (mode == SyncMode::BeforeLaunch ? BEFORE_LAUNCH_OPERATION_TIMEOUT : SYNC_OPERATION_TIMEOUT);
+    std::unique_lock operation_lock(m_sync_mutex, std::defer_lock);
+    if (!operation_lock.try_lock_until(deadline))
+    {
+      SetStatus("EmuBank sync timed out waiting for another sync pass to finish.");
+      return;
+    }
+
+    m_is_syncing.store(true, std::memory_order_release);
+    Common::ScopeGuard syncing_guard{
+        [this] { m_is_syncing.store(false, std::memory_order_release); }};
+    m_sync_deadline = deadline;
+    if (mode == SyncMode::BeforeLaunch)
+      SetStatus("EmuBank is checking cloud saves before launch…");
+    else if (mode == SyncMode::Live)
+      SetStatus("EmuBank is checking for stable local save changes…");
+    else
+      SetStatus("EmuBank is checking device save bindings…");
+    DisplaySyncMessage("EmuBank: connecting...", 2500);
+
     const bool invalidate_savestate_ancestors = PersistPendingAncestorInvalidation();
 
     const auto connection = GetConnection();
     if (!connection)
       return;
 
+    const std::string resolution_notice = ResolveActiveGame(*connection, mode);
+    if (std::chrono::steady_clock::now() >= m_sync_deadline)
+    {
+      if (mode == SyncMode::BeforeLaunch)
+      {
+        SetStatus("EmuBank's pre-launch check timed out; launch is continuing without waiting.");
+        DisplaySyncMessage("EmuBank check timed out; continuing launch", 5000, OsdTone::Warning);
+      }
+      else
+      {
+        SetStatus("EmuBank sync timed out while linking the active game; it will retry later.");
+      }
+      return;
+    }
     const auto manifest = FetchManifest(*connection);
     if (!manifest)
       return;
+
+    if (!manifest->bindings.empty())
+    {
+      DisplaySyncMessage(fmt::format("EmuBank: found {} bound save{}", manifest->bindings.size(),
+                                     manifest->bindings.size() == 1 ? "" : "s"),
+                         2500);
+    }
 
     if (m_state_server_url != connection->base_url || m_state_device_id != connection->device_id)
     {
@@ -1633,6 +2420,7 @@ private:
     }
 
     SyncStats stats;
+    bool timed_out = false;
     std::set<std::string, std::less<>> manifest_binding_ids;
     for (const Binding& binding : manifest->bindings)
       manifest_binding_ids.insert(binding.id);
@@ -1642,9 +2430,12 @@ private:
       if (std::chrono::steady_clock::now() >= m_sync_deadline)
       {
         stats.deferred += static_cast<int>(manifest->bindings.size() - index);
+        timed_out = true;
         break;
       }
       const Binding& binding = manifest->bindings[index];
+      SetStatus(fmt::format("EmuBank is checking save {} of {}: {}…", index + 1,
+                            manifest->bindings.size(), BindingDisplayName(binding.relative_path)));
       ProcessBinding(*connection, binding, mode, &stats);
     }
 
@@ -1655,14 +2446,25 @@ private:
     if (m_state_dirty)
       SaveState();
 
-    if (stats.bindings == 0)
+    if (manifest->bindings.empty())
     {
-      SetStatus("EmuBank connected; no Dolphin save paths are bound to this device.");
+      if (!resolution_notice.empty())
+      {
+        SetStatus(resolution_notice);
+      }
+      else
+      {
+        SetStatus("EmuBank is connected, but this device has no Dolphin save bindings. Nothing was "
+                  "uploaded or downloaded. Start a GameCube game to link its GCI save.");
+        DisplaySyncMessage("EmuBank: no Dolphin save is linked to this device", 6000,
+                           OsdTone::Warning);
+      }
     }
     else
     {
-      std::string status = fmt::format("EmuBank connected: {} current, {} uploaded, {} downloaded",
-                                       stats.current, stats.uploaded, stats.downloaded);
+      std::string status = fmt::format("EmuBank sync{}: {} current, {} uploaded, {} downloaded",
+                                       timed_out ? " timed out" : " complete", stats.current,
+                                       stats.uploaded, stats.downloaded);
       if (stats.deferred)
         status += fmt::format(", {} deferred", stats.deferred);
       if (stats.conflicts)
@@ -1670,7 +2472,43 @@ private:
       if (stats.errors)
         status += fmt::format(", {} error(s)", stats.errors);
       status += '.';
+      if (!resolution_notice.empty())
+        status += " " + resolution_notice;
       SetStatus(std::move(status));
+      if (timed_out)
+      {
+        DisplaySyncMessage(fmt::format("EmuBank timed out; {} save(s) deferred", stats.deferred),
+                           5000, OsdTone::Warning);
+      }
+      else if (stats.errors)
+      {
+        DisplaySyncMessage(
+            fmt::format("EmuBank finished with {} error(s); it will retry", stats.errors), 6000,
+            OsdTone::Error);
+      }
+      else if (stats.conflicts)
+      {
+        DisplaySyncMessage(
+            fmt::format("EmuBank safely retained {} conflict copy/copies", stats.conflicts), 6000,
+            OsdTone::Warning);
+      }
+      else if (stats.deferred)
+      {
+        DisplaySyncMessage(
+            fmt::format("EmuBank deferred {} save(s); it will retry", stats.deferred), 5000,
+            OsdTone::Warning);
+      }
+      else if (!resolution_notice.empty())
+      {
+        DisplaySyncMessage("EmuBank synced other saves; the active game needs attention", 6000,
+                           OsdTone::Warning);
+      }
+      else
+      {
+        DisplaySyncMessage(fmt::format("EmuBank sync complete: {} uploaded, {} downloaded",
+                                       stats.uploaded, stats.downloaded),
+                           4000, OsdTone::Success);
+      }
     }
   }
 
@@ -1732,13 +2570,13 @@ private:
     picojson::object bindings;
     for (const auto& [id, state] : m_state)
     {
-      bindings.emplace(id, picojson::value{picojson::object{
-                               {"base_sha256", picojson::value{state.base_sha256}},
-                               {"revision_id", picojson::value{state.revision_id}},
-                               {"conflict_pending", picojson::value{state.conflict_pending}},
-                               {"conflict_sha256", picojson::value{state.conflict_sha256}},
-                               {"ancestor_invalidated",
-                                picojson::value{state.ancestor_invalidated}}}});
+      bindings.emplace(id,
+                       picojson::value{picojson::object{
+                           {"base_sha256", picojson::value{state.base_sha256}},
+                           {"revision_id", picojson::value{state.revision_id}},
+                           {"conflict_pending", picojson::value{state.conflict_pending}},
+                           {"conflict_sha256", picojson::value{state.conflict_sha256}},
+                           {"ancestor_invalidated", picojson::value{state.ancestor_invalidated}}}});
     }
 
     const std::string json =
@@ -1777,11 +2615,16 @@ private:
   std::optional<std::chrono::steady_clock::time_point> m_save_sync_deadline;
   u64 m_requested_generation = 0;
   u64 m_completed_generation = 0;
+  std::atomic<u64> m_final_sync_generation = 0;
   std::thread m_worker;
 
-  std::mutex m_sync_mutex;
+  std::timed_mutex m_sync_mutex;
   std::chrono::steady_clock::time_point m_sync_deadline{};
+  std::atomic<bool> m_is_syncing = false;
   std::atomic<bool> m_emulation_active = false;
+  mutable std::mutex m_active_game_mutex;
+  std::optional<GameIdentity> m_active_game;
+  std::set<std::string, std::less<>> m_resolved_save_paths;
   // Set on the CPU thread after a successful savestate load and consumed by the sync worker. The
   // callback never waits for an in-flight network operation.
   std::atomic<bool> m_invalidate_ancestors_requested = false;
@@ -1790,6 +2633,9 @@ private:
   std::map<std::string, LocalState, std::less<>> m_state;
   std::map<std::string, PendingUpload, std::less<>> m_pending_uploads;
   bool m_state_dirty = false;
+
+  std::mutex m_config_snapshot_mutex;
+  SyncConfig m_last_sync_config;
 
   mutable std::mutex m_pairing_mutex;
   std::mutex m_pairing_operation_mutex;
@@ -1881,7 +2727,17 @@ void RequestSync()
     manager = s_manager;
   }
   if (manager)
-    manager->Request();
+    manager->Request(true);
+}
+
+bool IsSyncing()
+{
+  std::shared_ptr<Manager> manager;
+  {
+    std::lock_guard lock(s_manager_mutex);
+    manager = s_manager;
+  }
+  return manager && manager->IsSyncing();
 }
 
 bool SyncAndWait(std::chrono::milliseconds timeout)

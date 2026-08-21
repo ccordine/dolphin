@@ -75,7 +75,7 @@ EmuBankPane::EmuBankPane(QWidget* parent) : QWidget(parent)
       new ConfigBool(tr("Upload live save changes while playing"), Config::MAIN_EMUBANK_LIVE_SYNC);
   behavior_layout->addRow(m_live_sync);
 
-  m_sync_interval = new ConfigInteger(5, 300, Config::MAIN_EMUBANK_SYNC_INTERVAL, 5);
+  m_sync_interval = new ConfigInteger(30, 300, Config::MAIN_EMUBANK_SYNC_INTERVAL, 30);
   m_sync_interval->setSuffix(tr(" seconds"));
   behavior_layout->addRow(tr("Check interval:"), m_sync_interval);
 

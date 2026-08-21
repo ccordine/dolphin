@@ -225,6 +225,9 @@ bool VKGfx::BindBackbuffer(const ClearColor& clear_color)
 
   // Handle host window resizes.
   CheckForSurfaceChange();
+  if (!m_surface_available)
+    return false;
+
   CheckForSurfaceResize();
 
   // Check for exclusive fullscreen request.
@@ -311,7 +314,7 @@ void VKGfx::PresentBackbuffer()
   // End drawing to backbuffer
   StateTracker::GetInstance()->EndRenderPass();
 
-  if (m_swap_chain->IsCurrentImageValid())
+  if (m_surface_available && m_swap_chain->IsCurrentImageValid())
   {
     // Transition the backbuffer to PRESENT_SRC to ensure all commands drawing
     // to it have finished before present.
@@ -358,8 +361,15 @@ void VKGfx::ExecuteCommandBuffer(bool submit_off_thread, bool wait_for_completio
 
 void VKGfx::CheckForSurfaceChange()
 {
-  if (!g_presenter->SurfaceChangedTestAndClear() || !m_swap_chain)
+  const auto surface_change = g_presenter->TakeSurfaceChange();
+  if (!surface_change || !m_swap_chain)
     return;
+
+  if (!surface_change->GetHandle())
+  {
+    m_surface_available = false;
+    return;
+  }
 
   // Submit the current draws up until rendering the XFB.
   ExecuteCommandBuffer(false, true);
@@ -368,8 +378,10 @@ void VKGfx::CheckForSurfaceChange()
   g_command_buffer_mgr->CheckLastPresentFail();
 
   // Recreate the surface. If this fails we're in trouble.
-  if (!m_swap_chain->RecreateSurface(g_presenter->GetNewSurfaceHandle()))
+  if (!m_swap_chain->RecreateSurface(surface_change->GetHandle()))
     PanicAlertFmt("Failed to recreate Vulkan surface. Cannot continue.");
+
+  m_surface_available = true;
 
   // Handle case where the dimensions are now different.
   OnSwapChainResized();

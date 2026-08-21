@@ -25,6 +25,7 @@
 #include "VideoCommon/Widescreen.h"
 
 std::unique_ptr<VideoCommon::Presenter> g_presenter;
+std::mutex g_presenter_mutex;
 
 namespace VideoCommon
 {
@@ -106,8 +107,26 @@ Presenter::Presenter()
 
 Presenter::~Presenter()
 {
+  // A frontend can queue a surface change just as video teardown begins. If no backend consumes
+  // it, release every retired frontend handle here instead of leaking it.
+  std::vector<SurfaceRetirementCallback> retirements;
+  {
+    std::lock_guard lock(m_swap_mutex);
+    retirements = std::move(m_surface_retirements);
+  }
+  for (auto& retire : retirements)
+    retire();
+
   // Disable ControllerInterface's aspect ratio adjustments so mapping dialog behaves normally.
   g_controller_interface.SetAspectRatioAdjustment(1);
+}
+
+Presenter::SurfaceChange::~SurfaceChange()
+{
+  // m_lock remains owned throughout this destructor, so a newer frontend change cannot race the
+  // backend's final use of the old native surface.
+  for (auto& retire : m_retirements)
+    retire();
 }
 
 bool Presenter::Initialize()
@@ -587,9 +606,11 @@ void Presenter::ReleaseXFBContentLock()
     m_xfb_entry->ReleaseContentLock();
 }
 
-void Presenter::ChangeSurface(void* new_surface_handle)
+void Presenter::ChangeSurface(void* new_surface_handle, SurfaceRetirementCallback retirement)
 {
   std::lock_guard<std::mutex> lock(m_swap_mutex);
+  if (retirement)
+    m_surface_retirements.emplace_back(std::move(retirement));
   m_new_surface_handle = new_surface_handle;
   m_surface_changed.Set();
 }
@@ -600,11 +621,15 @@ void Presenter::ResizeSurface()
   m_surface_resized.Set();
 }
 
-void* Presenter::GetNewSurfaceHandle()
+std::optional<Presenter::SurfaceChange> Presenter::TakeSurfaceChange()
 {
-  void* handle = m_new_surface_handle;
+  std::unique_lock<std::mutex> lock(m_swap_mutex);
+  if (!m_surface_changed.TestAndClear())
+    return std::nullopt;
+
+  void* const handle = m_new_surface_handle;
   m_new_surface_handle = nullptr;
-  return handle;
+  return SurfaceChange{std::move(lock), handle, std::move(m_surface_retirements)};
 }
 
 u32 Presenter::AutoIntegralScale() const

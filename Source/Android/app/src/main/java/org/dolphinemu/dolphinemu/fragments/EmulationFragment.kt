@@ -12,6 +12,8 @@ import android.view.ViewGroup
 import android.widget.Toast
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
@@ -35,6 +37,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
     private var runWhenSurfaceIsValid = false
     private var loadPreviousTemporaryState = false
     private var launchSystemMenu = false
+    private var emuBankLaunchStatusJob: Job? = null
 
     private var emulationActivity: EmulationActivity? = null
 
@@ -97,6 +100,8 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
     }
 
     override fun onDestroyView() {
+        emuBankLaunchStatusJob?.cancel()
+        emuBankLaunchStatusJob = null
         super.onDestroyView()
         _binding = null
     }
@@ -161,7 +166,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         Log.debug("[EmulationFragment] Surface destroyed.")
-        NativeLibrary.SurfaceDestroyed()
+        NativeLibrary.SurfaceDestroyed(holder.surface)
         runWhenSurfaceIsValid = true
     }
 
@@ -210,6 +215,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
         runWhenSurfaceIsValid = false
         if (NativeLibrary.IsUninitialized()) {
             NativeLibrary.SetIsBooting()
+            monitorEmuBankLaunchStatus()
             val emulationThread = Thread({
                 // Don't load temporary saves when launching Netplay, this path can trigger
                 // when a game starts due to orientation changes caused by a mismatch in menu
@@ -221,8 +227,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
                         "Cannot start emulation without any game paths"
                     }
                     NativeLibrary.Run(paths, riivolution, temporaryStateFilePath, true)
-                }
-                if (launchSystemMenu) {
+                } else if (launchSystemMenu) {
                     Log.debug("[EmulationFragment] Starting emulation thread for the Wii Menu.")
                     NativeLibrary.RunSystemMenu()
                 } else if (netplaySession?.isLaunching == true) {
@@ -253,7 +258,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
                 EmulationActivity.stopIgnoringLaunchRequests()
             }, "NativeEmulation")
             emulationThread.start()
-        } else {
+        } else if (!NativeLibrary.IsBooting()) {
             if (!EmulationActivity.hasUserPausedEmulation && !NativeLibrary.IsShowingAlertMessage()) {
                 Log.debug("[EmulationFragment] Resuming emulation.")
                 NativeLibrary.UnPauseEmulation()
@@ -261,7 +266,34 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
         }
     }
 
-    fun saveTemporaryState() = NativeLibrary.SaveStateAs(temporaryStateFilePath)
+    private fun monitorEmuBankLaunchStatus() {
+        emuBankLaunchStatusJob?.cancel()
+        emuBankLaunchStatusJob = lifecycleScope.launch {
+            // SetIsBooting runs immediately before the native thread, while Core can still report
+            // Uninitialized for a short time. Keep watching through that handoff so the blocking
+            // pre-launch cloud check is visible instead of missing it entirely.
+            var checksRemaining = 400
+            while (!NativeLibrary.IsRunning() && checksRemaining-- > 0) {
+                val currentBinding = _binding
+                if (currentBinding != null) {
+                    if (NativeLibrary.IsEmuBankSyncing()) {
+                        currentBinding.emubankSyncStatus.text = NativeLibrary.GetEmuBankStatus()
+                        currentBinding.emubankSyncOverlay.visibility = View.VISIBLE
+                    } else {
+                        currentBinding.emubankSyncOverlay.visibility = View.GONE
+                    }
+                }
+                delay(100)
+            }
+            _binding?.emubankSyncOverlay?.visibility = View.GONE
+        }
+    }
+
+    fun saveTemporaryState() {
+        if (NativeLibrary.IsRunning()) {
+            NativeLibrary.SaveStateAs(temporaryStateFilePath)
+        }
+    }
 
     private val temporaryStateFilePath: String
         get() = "${requireContext().filesDir}${File.separator}temp.sav"
@@ -288,7 +320,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
         private fun deleteFile(path: String) {
             try {
                 val file = File(path)
-                if (!file.delete()) {
+                if (file.exists() && !file.delete()) {
                     Log.error("[EmulationFragment] Failed to delete ${file.absolutePath}")
                 }
             } catch (ignored: Exception) {

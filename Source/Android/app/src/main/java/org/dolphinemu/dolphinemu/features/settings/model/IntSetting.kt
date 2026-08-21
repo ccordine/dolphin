@@ -37,7 +37,7 @@ enum class IntSetting(
         Settings.FILE_DOLPHIN,
         Settings.SECTION_EMUBANK,
         "SyncIntervalSeconds",
-        5
+        30
     ),
     MAIN_OVERLAY_GC_CONTROLLER(
         Settings.FILE_DOLPHIN,

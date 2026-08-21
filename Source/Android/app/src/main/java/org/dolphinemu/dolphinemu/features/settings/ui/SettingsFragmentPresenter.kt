@@ -62,7 +62,11 @@ class SettingsFragmentPresenter(
     private var controllerNumber = 0
     private var controllerType = 0
     private var emuBankPairingJob: Job? = null
+    private var emuBankStatusJob: Job? = null
+    private var emuBankManualSyncJob: Job? = null
     private var emuBankApprovalDialog: AlertDialog? = null
+    private var emuBankStatusIndex = -1
+    private var emuBankStatusText = ""
 
     var gpuDriver: GpuDriverMetadata? = null
     private val libNameSetting: StringSetting = StringSetting.GFX_DRIVER_LIB_NAME
@@ -101,12 +105,17 @@ class SettingsFragmentPresenter(
 
         if (menuTag == MenuTag.CONFIG_EMUBANK) {
             resumeEmuBankPairingIfNeeded()
+            startEmuBankStatusPolling()
         }
     }
 
     fun onDestroyView() {
         emuBankPairingJob?.cancel()
         emuBankPairingJob = null
+        emuBankStatusJob?.cancel()
+        emuBankStatusJob = null
+        emuBankManualSyncJob?.cancel()
+        emuBankManualSyncJob = null
         emuBankApprovalDialog?.dismiss()
         emuBankApprovalDialog = null
     }
@@ -329,6 +338,9 @@ class SettingsFragmentPresenter(
                 R.string.emubank_cloud_sync_description
             )
         )
+        emuBankStatusText = NativeLibrary.GetEmuBankStatus()
+        emuBankStatusIndex = sl.size
+        sl.add(HeaderSetting(context.getString(R.string.emubank_status), emuBankStatusText))
         sl.add(
             SwitchSetting(
                 context,
@@ -386,10 +398,10 @@ class SettingsFragmentPresenter(
                 IntSetting.MAIN_EMUBANK_SYNC_INTERVAL,
                 R.string.emubank_sync_interval,
                 R.string.emubank_sync_interval_description,
-                5,
+                30,
                 300,
                 " s",
-                5
+                30
             )
         )
         sl.add(
@@ -398,10 +410,63 @@ class SettingsFragmentPresenter(
                 R.string.emubank_sync_now,
                 R.string.emubank_sync_now_description,
                 0,
-                R.string.emubank_sync_requested,
+                0,
                 true
-            ) { NativeLibrary.RequestEmuBankSync() }
+            ) { requestEmuBankSync() }
         )
+    }
+
+    private fun startEmuBankStatusPolling() {
+        if (emuBankStatusJob?.isActive == true) {
+            return
+        }
+
+        emuBankStatusJob = fragmentView.fragmentActivity.lifecycleScope.launch {
+            while (true) {
+                refreshEmuBankStatus()
+                delay(500)
+            }
+        }
+    }
+
+    private fun refreshEmuBankStatus(): String {
+        val status = NativeLibrary.GetEmuBankStatus()
+        if (status != emuBankStatusText && emuBankStatusIndex >= 0) {
+            val list = settingsList
+            if (list != null && emuBankStatusIndex < list.size) {
+                emuBankStatusText = status
+                list[emuBankStatusIndex] =
+                    HeaderSetting(context.getString(R.string.emubank_status), status)
+                fragmentView.adapter?.notifyItemChanged(emuBankStatusIndex)
+            }
+        }
+        return status
+    }
+
+    private fun requestEmuBankSync() {
+        NativeLibrary.RequestEmuBankSync()
+        fragmentView.showToastMessage(context.getString(R.string.emubank_sync_requested))
+
+        emuBankManualSyncJob?.cancel()
+        emuBankManualSyncJob = fragmentView.fragmentActivity.lifecycleScope.launch {
+            var observedRunning = false
+            var completedStatusSamples = 0
+            repeat(240) {
+                val syncing = NativeLibrary.IsEmuBankSyncing()
+                observedRunning = observedRunning || syncing
+                val status = refreshEmuBankStatus()
+                completedStatusSamples =
+                    if (!syncing && !status.endsWith("queued…")) completedStatusSamples + 1 else 0
+                // Very fast passes can begin and finish between polls. A status that remains out
+                // of the queued/running state for a full second is also a completed pass.
+                if (!syncing && (observedRunning || completedStatusSamples >= 4)) {
+                    fragmentView.showToastMessage(status)
+                    return@launch
+                }
+                delay(250)
+            }
+            fragmentView.showToastMessage(refreshEmuBankStatus())
+        }
     }
 
     private fun startEmuBankPairing() {

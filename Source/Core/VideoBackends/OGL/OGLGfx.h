@@ -114,6 +114,7 @@ private:
   u32 m_shared_read_framebuffer = 0;
   u32 m_shared_draw_framebuffer = 0;
   float m_backbuffer_scale;
+  bool m_surface_available = true;
 };
 
 inline OGLGfx* GetOGLGfx()

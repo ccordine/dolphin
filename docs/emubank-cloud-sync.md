@@ -16,14 +16,22 @@ database migrations as part of deployment.
    EmuBank receives only its SHA-256 hash, and neither the secret nor your account password is put
    in the browser link. HTTPS is required unless insecure HTTP is explicitly enabled for a trusted
    development network.
-3. In EmuBank's **Devices & Sync** page, connect each cloud save to its logical Dolphin path.
-   Supported bindings are files below `GC/` or `Wii/`, such as
+3. When a GameCube game starts, Dolphin sends its trusted disc metadata (game ID, title, region,
+   and revision, but never ROM bytes) to EmuBank. EmuBank first matches an owned save and creates
+   the device binding automatically. If the game is not in the library, an approved device can
+   create a private game, playthrough, and save entry; the first GCI write supplies the exact save
+   filename. Ambiguous matches remain untouched and require a choice in EmuBank. The manual
+   **Devices & Sync** binding UI remains available for raw memory cards, Wii multi-file saves, and
+   other advanced cases.
+4. Automatic bindings are files below `GC/` or `Wii/`, such as
    `GC/USA/Card A/01-GC6E-pokemon_colosseum.gci`. The portion after `Wii/` is relative to Dolphin's
    configured NAND root, including a custom root outside the user directory; the portion after
    `GC/` is relative to Dolphin's GameCube user-data root. EmuBank enforces each binding's
    `download_only`, `upload_only`, or `two_way` direction on the API as well as Dolphin honoring it
    locally.
-4. Use **Sync Now**, or let automatic synchronization run. A masked manual device-token field
+5. Use **Sync Now**, or let automatic synchronization run. Dolphin shows the current phase and
+   final result in the EmuBank settings page, in a launch progress overlay, and through its normal
+   in-game on-screen messages. A masked manual device-token field
    remains available as an advanced fallback for older or independently deployed servers.
 
 For GameCube games, GCI Folder memory-card mode is strongly recommended. A per-game `.gci` file is
@@ -36,12 +44,14 @@ Dolphin never replaces any bound file while emulation is active.
   rather than trusting a possibly stale manifest, and replaces the local file through a temporary
   file only while emulation is stopped.
 - Before a game launches, Dolphin performs a blocking pull so the emulated memory card opens the
-  selected cloud revision. A complete sync pass has a 30-second budget; an unreachable server does
-  not prevent the game from launching after that budget.
+  selected cloud revision. The pre-launch check has a 12-second total budget; stopped/final sync
+  passes have a 30-second budget. An unreachable server does not prevent the game from launching
+  after the shorter pre-launch budget.
 - While playing, Dolphin wakes the sync worker after a successful GCI/raw memory-card flush or a
   dirty Wii title-data file close. Events are coalesced, and a changed file uploads only after the
-  same complete hash is observed across multiple checks. Periodic polling remains a recovery path;
-  remote changes remain pending until emulation stops. Raw cards inherit Dolphin's normal flush
+  same complete hash is observed across multiple checks. Dolphin does not periodically fetch and
+  hash every binding during play; event-driven retries and the final stopped pass provide catch-up.
+  Remote changes remain pending until emulation stops. Raw cards inherit Dolphin's normal flush
   cadence (up to about 15 seconds); GCI Folder mode provides finer-grained updates.
 - Automatic checks run while the Dolphin process is alive. Android may stop an idle process; the
   pre-launch sync catches up the next time Dolphin starts a game.
@@ -61,6 +71,10 @@ Dolphin never replaces any bound file while emulation is active.
 This first integration synchronizes file contents, not local file deletion. Removing a bound file
 locally does not delete its cloud revision.
 
+If one GameCube title owns multiple independent local GCI entries, Dolphin leaves new automatic
+links untouched until each entry can be selected in **Devices & Sync**. Existing explicit bindings
+still synchronize. This avoids collapsing separate in-game save entries into one cloud revision.
+
 Wii title saves are often multi-file directories. Individual supported files can be bound and
 backed up, but this first integration does not yet create an atomic whole-title `data.bin` snapshot
 while a Wii game is running. Whole-save packaging should happen after exit in a future extension.
@@ -79,5 +93,5 @@ ServerURL = https://bank.example.com
 DeviceToken = device-id.secret
 AllowInsecureHTTP = False
 LiveSync = True
-SyncIntervalSeconds = 5
+SyncIntervalSeconds = 30
 ```

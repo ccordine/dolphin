@@ -304,6 +304,9 @@ object NativeLibrary {
     external fun RequestEmuBankSync()
 
     @JvmStatic
+    external fun IsEmuBankSyncing(): Boolean
+
+    @JvmStatic
     external fun BeginEmuBankPairing(
         serverUrl: String,
         deviceName: String,
@@ -377,7 +380,7 @@ object NativeLibrary {
     external fun SurfaceChanged(surf: Surface)
 
     @JvmStatic
-    external fun SurfaceDestroyed()
+    external fun SurfaceDestroyed(surf: Surface)
 
     @JvmStatic
     external fun HasSurface(): Boolean
@@ -398,6 +401,12 @@ object NativeLibrary {
    */
     @JvmStatic
     external fun SetIsBooting()
+
+    /**
+     * Returns true while the native emulation thread is still booting.
+     */
+    @JvmStatic
+    external fun IsBooting(): Boolean
 
     /**
      * Returns true if emulation is running or paused.

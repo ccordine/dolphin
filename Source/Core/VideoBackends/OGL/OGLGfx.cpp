@@ -410,6 +410,9 @@ void OGLGfx::ClearRegion(const MathUtil::Rectangle<int>& target_rc, bool colorEn
 bool OGLGfx::BindBackbuffer(const ClearColor& clear_color)
 {
   CheckForSurfaceChange();
+  if (!m_surface_available)
+    return false;
+
   CheckForSurfaceResize();
   SetAndClearFramebuffer(m_system_framebuffer.get(), clear_color);
   return true;
@@ -417,6 +420,9 @@ bool OGLGfx::BindBackbuffer(const ClearColor& clear_color)
 
 void OGLGfx::PresentBackbuffer()
 {
+  if (!m_surface_available)
+    return;
+
   if (g_ogl_config.bSupportsDebug)
   {
     if (Common::Log::LogManager::GetInstance()->IsEnabled(Common::Log::LogType::HOST_GPU,
@@ -459,10 +465,22 @@ void OGLGfx::WaitForGPUIdle()
 
 void OGLGfx::CheckForSurfaceChange()
 {
-  if (!g_presenter->SurfaceChangedTestAndClear())
+  const auto surface_change = g_presenter->TakeSurfaceChange();
+  if (!surface_change)
     return;
 
-  m_main_gl_context->UpdateSurface(g_presenter->GetNewSurfaceHandle());
+  void* const surface_handle = surface_change->GetHandle();
+  if (!surface_handle)
+  {
+    // Android reports the destroyed surface before its replacement is available. Keep the EGL
+    // surface alive but stop presenting to it; the next non-null change replaces it. Passing the
+    // null handle to EGLAndroid would dereference ANativeWindow on the video thread.
+    m_surface_available = false;
+    return;
+  }
+
+  m_main_gl_context->UpdateSurface(surface_handle);
+  m_surface_available = true;
 
   u32 width = m_main_gl_context->GetBackBufferWidth();
   u32 height = m_main_gl_context->GetBackBufferHeight();

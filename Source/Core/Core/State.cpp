@@ -503,6 +503,12 @@ void SaveAs(Core::System& system, std::string filename)
 {
   Core::RunOnCPUThread(
       system, [&system, filename = std::move(filename), lock = GetStateSaveTaskLock()]() mutable {
+        // A frontend can receive a lifecycle save request while the core is stopping. In that
+        // case RunOnCPUThread executes this callback on the calling thread because there is no
+        // longer an active CPU thread. DoState must never run from that thread.
+        if (!Core::IsRunning(system))
+          return;
+        ASSERT(Core::IsCPUThread());
         SaveAsFromCore(system, std::move(filename));
       });
 }

@@ -488,9 +488,10 @@ void Metal::Gfx::PresentBackbuffer()
 
 void Metal::Gfx::CheckForSurfaceChange()
 {
-  if (!g_presenter->SurfaceChangedTestAndClear())
+  const auto surface_change = g_presenter->TakeSurfaceChange();
+  if (!surface_change)
     return;
-  m_layer = MRCRetain(static_cast<CAMetalLayer*>(g_presenter->GetNewSurfaceHandle()));
+  m_layer = MRCRetain(static_cast<CAMetalLayer*>(surface_change->GetHandle()));
   SetupSurface();
 }
 

@@ -322,7 +322,10 @@ bool VideoBackendBase::InitializeShared(std::unique_ptr<AbstractGfx> gfx,
   g_texture_cache = std::move(texture_cache);
   g_efb_interface = std::move(efb_interface);
 
-  g_presenter = std::make_unique<VideoCommon::Presenter>();
+  {
+    std::lock_guard lock(g_presenter_mutex);
+    g_presenter = std::make_unique<VideoCommon::Presenter>();
+  }
   g_frame_dumper = std::make_unique<FrameDumper>();
   g_framebuffer_manager = std::make_unique<FramebufferManager>();
   g_shader_cache = std::make_unique<VideoCommon::ShaderCache>();
@@ -375,7 +378,10 @@ void VideoBackendBase::ShutdownShared()
   system.GetCustomResourceManager().Shutdown();
 
   g_frame_dumper.reset();
-  g_presenter.reset();
+  {
+    std::lock_guard lock(g_presenter_mutex);
+    g_presenter.reset();
+  }
 
   if (g_shader_cache)
     g_shader_cache->Shutdown();

@@ -37,6 +37,7 @@
 #include "Core/Boot/Boot.h"
 #include "Core/BootManager.h"
 #include "Core/CommonTitles.h"
+#include "Core/Config/MainSettings.h"
 #include "Core/ConfigLoaders/GameConfigLoader.h"
 #include "Core/ConfigManager.h"
 #include "Core/Core.h"
@@ -265,6 +266,11 @@ JNIEXPORT void JNICALL Java_org_dolphinemu_dolphinemu_NativeLibrary_SetIsBooting
   s_is_booting.Set();
 }
 
+JNIEXPORT jboolean JNICALL Java_org_dolphinemu_dolphinemu_NativeLibrary_IsBooting(JNIEnv*, jclass)
+{
+  return s_is_booting.IsSet();
+}
+
 JNIEXPORT jboolean JNICALL Java_org_dolphinemu_dolphinemu_NativeLibrary_IsRunning(JNIEnv*, jclass)
 {
   return static_cast<jboolean>(Core::IsRunning(Core::System::GetInstance()));
@@ -442,43 +448,85 @@ JNIEXPORT void JNICALL Java_org_dolphinemu_dolphinemu_NativeLibrary_SurfaceChang
                                                                                    jclass,
                                                                                    jobject surf)
 {
-  std::lock_guard<std::mutex> guard(s_surface_lock);
-
-  s_surf = ANativeWindow_fromSurface(env, surf);
-  if (s_surf == nullptr)
+  ANativeWindow* const new_surface = ANativeWindow_fromSurface(env, surf);
+  if (!new_surface)
+  {
     __android_log_print(ANDROID_LOG_ERROR, DOLPHIN_TAG, "Error: Surface is null.");
+    return;
+  }
 
-  if (g_presenter)
-    g_presenter->ChangeSurface(s_surf);
+  std::lock_guard<std::mutex> guard(s_surface_lock);
+  ANativeWindow* previous_surface = nullptr;
+  if (new_surface == s_surf)
+  {
+    // ANativeWindow_fromSurface acquired an additional reference. Retain the existing owned
+    // reference, but still notify Presenter because the size or format can have changed.
+    ANativeWindow_release(new_surface);
+  }
+  else
+  {
+    previous_surface = std::exchange(s_surf, new_surface);
+  }
+
+  {
+    std::lock_guard presenter_guard(g_presenter_mutex);
+    if (g_presenter && previous_surface)
+    {
+      // The backend can keep presenting to the old native window until it consumes this event.
+      // Transfer the old owned reference to Presenter and retire it only after Update/Recreate.
+      g_presenter->ChangeSurface(s_surf,
+                                 [previous_surface] { ANativeWindow_release(previous_surface); });
+      previous_surface = nullptr;
+    }
+    else if (g_presenter)
+    {
+      g_presenter->ChangeSurface(s_surf);
+    }
+  }
+
+  // Before Presenter exists, Boot holds its own reference and no video backend can use the old
+  // global reference.
+  if (previous_surface)
+    ANativeWindow_release(previous_surface);
 
   s_surface_cv.notify_all();
 }
 
-JNIEXPORT void JNICALL Java_org_dolphinemu_dolphinemu_NativeLibrary_SurfaceDestroyed(JNIEnv*,
-                                                                                     jclass)
+JNIEXPORT void JNICALL Java_org_dolphinemu_dolphinemu_NativeLibrary_SurfaceDestroyed(JNIEnv* env,
+                                                                                     jclass,
+                                                                                     jobject surf)
 {
+  ANativeWindow* const destroyed_surface = ANativeWindow_fromSurface(env, surf);
+  if (!destroyed_surface)
   {
-    // If emulation continues running without a valid surface, we will probably crash,
-    // so pause emulation until we get a valid surface again. EmulationFragment handles resuming.
-    while (s_is_booting.IsSet())
+    __android_log_print(ANDROID_LOG_WARN, DOLPHIN_TAG,
+                        "Ignoring surface-destroyed callback without a native window.");
+    return;
+  }
+  Common::ScopeGuard callback_ref{
+      [destroyed_surface] { ANativeWindow_release(destroyed_surface); }};
+
+  std::lock_guard guard(s_surface_lock);
+  // An old Fragment can be destroyed after a replacement has already installed a new surface.
+  // Never let that stale callback pause emulation or clear the replacement.
+  if (s_surf != destroyed_surface)
+    return;
+
+  if (Core::GetState(Core::System::GetInstance()) == Core::State::Running)
+    Core::SetState(Core::System::GetInstance(), Core::State::Paused, true, true);
+
+  ANativeWindow* retired_surface = std::exchange(s_surf, nullptr);
+  {
+    std::lock_guard presenter_guard(g_presenter_mutex);
+    if (g_presenter)
     {
-      // Need to wait for boot to finish before we can pause
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      g_presenter->ChangeSurface(nullptr,
+                                 [retired_surface] { ANativeWindow_release(retired_surface); });
+      retired_surface = nullptr;
     }
-    if (Core::GetState(Core::System::GetInstance()) == Core::State::Running)
-      Core::SetState(Core::System::GetInstance(), Core::State::Paused);
   }
-
-  std::lock_guard surface_guard(s_surface_lock);
-
-  if (g_presenter)
-    g_presenter->ChangeSurface(nullptr);
-
-  if (s_surf)
-  {
-    ANativeWindow_release(s_surf);
-    s_surf = nullptr;
-  }
+  if (retired_surface)
+    ANativeWindow_release(retired_surface);
 
   s_surface_cv.notify_all();
 }
@@ -493,7 +541,8 @@ JNIEXPORT jboolean JNICALL Java_org_dolphinemu_dolphinemu_NativeLibrary_HasSurfa
 JNIEXPORT jfloat JNICALL Java_org_dolphinemu_dolphinemu_NativeLibrary_GetGameAspectRatio(JNIEnv*,
                                                                                          jclass)
 {
-  return g_presenter->CalculateDrawAspectRatio();
+  std::lock_guard guard(g_presenter_mutex);
+  return g_presenter ? g_presenter->CalculateDrawAspectRatio() : 1.0f;
 }
 
 JNIEXPORT void JNICALL Java_org_dolphinemu_dolphinemu_NativeLibrary_RefreshWiimotes(JNIEnv*, jclass)
@@ -517,6 +566,12 @@ JNIEXPORT void JNICALL Java_org_dolphinemu_dolphinemu_NativeLibrary_RequestEmuBa
                                                                                        jclass)
 {
   UICommon::EmuBank::RequestSync();
+}
+
+JNIEXPORT jboolean JNICALL Java_org_dolphinemu_dolphinemu_NativeLibrary_IsEmuBankSyncing(JNIEnv*,
+                                                                                         jclass)
+{
+  return UICommon::EmuBank::IsSyncing();
 }
 
 JNIEXPORT jstring JNICALL Java_org_dolphinemu_dolphinemu_NativeLibrary_BeginEmuBankPairing(
@@ -600,11 +655,19 @@ static void Run(JNIEnv* env, std::unique_ptr<BootParameters>&& boot, bool riivol
   }
 
   s_need_nonblocking_alert_msg = true;
-  std::unique_lock<std::mutex> surface_guard(s_surface_lock);
+  ANativeWindow* boot_surface = nullptr;
+  {
+    std::unique_lock<std::mutex> surface_guard(s_surface_lock);
+    s_surface_cv.wait(surface_guard, []() { return s_surf != nullptr; });
+    boot_surface = s_surf;
+    ANativeWindow_acquire(boot_surface);
+  }
+  Common::ScopeGuard boot_surface_ref{[boot_surface] { ANativeWindow_release(boot_surface); }};
 
-  s_surface_cv.wait(surface_guard, []() { return s_surf != nullptr; });
-
-  WindowSystemInfo wsi(WindowSystemType::Android, nullptr, s_surf, s_surf);
+  // Boot owns an explicit native-window reference instead of the global surface mutex. Android's
+  // UI thread can therefore deliver destroy/recreate callbacks immediately while a pre-launch
+  // EmuBank request is in progress.
+  WindowSystemInfo wsi(WindowSystemType::Android, nullptr, boot_surface, boot_surface);
   wsi.render_surface_scale = GetRenderSurfaceScale(env);
 
   if (BootManager::BootCore(Core::System::GetInstance(), std::move(boot), wsi))
@@ -614,9 +677,21 @@ static void Run(JNIEnv* env, std::unique_ptr<BootParameters>&& boot, bool riivol
       std::this_thread::sleep_for(std::chrono::milliseconds(WAIT_STEP));
   }
 
+  // A surface callback can arrive before Presenter is constructed. Reconcile its latest value now
+  // so a surface destroyed during boot is never presented after boot completes.
+  {
+    std::lock_guard guard(s_surface_lock);
+    std::lock_guard presenter_guard(g_presenter_mutex);
+    if (g_presenter && s_surf != boot_surface)
+    {
+      g_presenter->ChangeSurface(s_surf, [boot_surface] { ANativeWindow_release(boot_surface); });
+      boot_surface_ref.Dismiss();
+    }
+  }
+  boot_surface_ref.Exit();
+
   s_is_booting.Clear();
   s_need_nonblocking_alert_msg = false;
-  surface_guard.unlock();
 
   while (Core::IsRunning(Core::System::GetInstance()))
   {
@@ -626,11 +701,30 @@ static void Run(JNIEnv* env, std::unique_ptr<BootParameters>&& boot, bool riivol
 
   s_game_metadata_is_valid = false;
   Core::Shutdown(Core::System::GetInstance());
-  if (!UICommon::EmuBank::SyncAndWait(std::chrono::seconds{15}))
+  const bool emubank_enabled = Config::Get(Config::MAIN_EMUBANK_ENABLED);
+  if (emubank_enabled)
+  {
+    jstring message = ToJString(env, "EmuBank is checking for saves to back up…");
+    env->CallStaticVoidMethod(IDCache::GetNativeLibraryClass(), IDCache::GetDisplayToastMsg(),
+                              message, JNI_TRUE);
+    env->DeleteLocalRef(message);
+  }
+
+  const bool final_sync_finished = UICommon::EmuBank::SyncAndWait(std::chrono::seconds{15});
+  if (!final_sync_finished)
   {
     __android_log_print(ANDROID_LOG_WARN, DOLPHIN_TAG,
                         "EmuBank final sync did not finish within 15 seconds; background sync may "
                         "continue");
+  }
+  if (emubank_enabled)
+  {
+    jstring message = ToJString(env, final_sync_finished ? UICommon::EmuBank::GetStatus() :
+                                                           "EmuBank is still syncing in the "
+                                                           "background; check Status for details.");
+    env->CallStaticVoidMethod(IDCache::GetNativeLibraryClass(), IDCache::GetDisplayToastMsg(),
+                              message, JNI_TRUE);
+    env->DeleteLocalRef(message);
   }
 
   env->CallStaticVoidMethod(IDCache::GetNativeLibraryClass(),
