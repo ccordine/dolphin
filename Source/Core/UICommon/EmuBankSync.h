@@ -45,8 +45,8 @@ void RequestSync();
 // Returns whether a manifest, upload, or download pass is currently in progress.
 bool IsSyncing();
 
-// Requests a fresh stopped-emulation sync and waits up to the supplied bound for that request to
-// finish. This is intended for orderly frontend shutdown paths, not UI threads.
+// Waits for the queued stopped-emulation sync (or requests one if none exists) up to the supplied
+// bound. This is intended for orderly frontend shutdown paths, not UI threads.
 bool SyncAndWait(std::chrono::milliseconds timeout);
 
 // A short, human-readable status suitable for settings UIs. Credentials are never included.

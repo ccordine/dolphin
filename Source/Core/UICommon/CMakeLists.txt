@@ -7,6 +7,7 @@ add_library(uicommon
   DiscordPresence.h
   EmuBankSync.cpp
   EmuBankSync.h
+  EmuBankSyncPolicy.h
   GameFile.cpp
   GameFile.h
   GameFileCache.cpp

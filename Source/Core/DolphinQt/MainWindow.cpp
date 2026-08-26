@@ -328,8 +328,8 @@ MainWindow::MainWindow(Core::System& system, std::unique_ptr<BootParameters> boo
 
   if (m_pending_boot != nullptr)
   {
-    StartGame(std::move(m_pending_boot));
-    m_pending_boot.reset();
+    auto pending_boot = std::move(m_pending_boot);
+    StartGame(std::move(pending_boot));
   }
 }
 
@@ -946,8 +946,8 @@ void MainWindow::OnStopComplete()
   // If the current emulation prevented the booting of another, do that now
   if (m_pending_boot != nullptr)
   {
-    StartGame(std::move(m_pending_boot));
-    m_pending_boot.reset();
+    auto pending_boot = std::move(m_pending_boot);
+    StartGame(std::move(pending_boot));
   }
 }
 
@@ -1168,6 +1168,15 @@ void MainWindow::StartGame(const std::vector<std::string>& paths,
 
 void MainWindow::StartGame(std::unique_ptr<BootParameters>&& parameters)
 {
+  // The pre-boot cloud-save gate deliberately processes paint/timer events. Queue any launch that
+  // arrives through those events until this BootCore call has returned so it cannot recursively
+  // replace the active game's metadata.
+  if (m_boot_in_progress)
+  {
+    m_pending_boot = std::move(parameters);
+    return;
+  }
+
   if (parameters && std::holds_alternative<BootParameters::Disc>(parameters->parameters))
   {
     if (std::get<BootParameters::Disc>(parameters->parameters).volume->IsNKit())
@@ -1218,13 +1227,21 @@ void MainWindow::StartGame(std::unique_ptr<BootParameters>&& parameters)
   ShowRenderWidget();
 
   // Boot up, show an error if it fails to load the game.
-  if (!BootManager::BootCore(m_system, std::move(parameters),
-                             ::GetWindowSystemInfo(m_render_widget->windowHandle())))
+  m_boot_in_progress = true;
+  Common::ScopeGuard boot_guard{[this] { m_boot_in_progress = false; }};
+  const bool started = BootManager::BootCore(
+      m_system, std::move(parameters), ::GetWindowSystemInfo(m_render_widget->windowHandle()));
+  if (!started)
   {
     ModalMessageBox::critical(this, tr("Error"), tr("Failed to init core"), QMessageBox::Ok);
     HideRenderWidget();
+    auto pending_boot = std::move(m_pending_boot);
+    boot_guard.Exit();
+    if (pending_boot)
+      StartGame(std::move(pending_boot));
     return;
   }
+  boot_guard.Exit();
 
 #ifdef USE_DISCORD_PRESENCE
   if (!NetPlay::IsNetPlayRunning())
@@ -1233,6 +1250,15 @@ void MainWindow::StartGame(std::unique_ptr<BootParameters>&& parameters)
 
   if (Config::Get(Config::MAIN_FULLSCREEN))
     m_fullscreen_requested = true;
+
+  // A queued file-open/game launch that arrived while the pre-boot event pump was active should
+  // behave exactly like a launch requested during normal emulation: stop this game and start the
+  // most recently requested one when shutdown completes.
+  if (m_pending_boot)
+  {
+    auto pending_boot = std::move(m_pending_boot);
+    StartGame(std::move(pending_boot));
+  }
 }
 
 void MainWindow::SetFullScreenResolution(bool fullscreen)

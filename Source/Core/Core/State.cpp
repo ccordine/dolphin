@@ -221,6 +221,9 @@ static bool CheckIfStateLoadIsAllowed(Core::System& system)
   return true;
 }
 
+// The caller must hold the savestate-load gate from before this function begins until any required
+// rollback is complete. A memory-card subsystem can queue host writes before a later subsystem
+// discovers that the buffer is invalid.
 static bool LoadFromBuffer(Core::System& system, std::span<u8> buffer)
 {
   u8* ptr = buffer.data();
@@ -230,6 +233,15 @@ static bool LoadFromBuffer(Core::System& system, std::span<u8> buffer)
   if (loaded_successfully)
     Core::NotifySavestateLoaded();
   return loaded_successfully;
+}
+
+static bool BeginSavestateLoad()
+{
+  if (Core::NotifyBeforeSavestateLoad())
+    return true;
+  Core::NotifySavestateLoadFinished(false);
+  Core::DisplayMessage("Savestate load canceled because save safety could not be armed", 6000);
+  return false;
 }
 
 // Returns the required size, or 0 on failure.
@@ -816,6 +828,31 @@ static void LoadFileStateData(const std::string& filename, Common::UniqueBuffer<
   ret_data.swap(buffer);
 }
 
+static bool UndoLoadStateFromCore(Core::System& system)
+{
+  if (s_undo_load_buffer.empty())
+  {
+    PanicAlertFmtT("There is nothing to undo!");
+    return false;
+  }
+
+  auto& movie = system.GetMovie();
+  if (!movie.IsMovieActive())
+    return LoadFromBuffer(system, s_undo_load_buffer);
+
+  // Note: Only the CPU thread writes to "undo.dtm".
+  const std::string dtmpath = File::GetUserPath(D_STATESAVES_IDX) + "undo.dtm";
+  if (!File::Exists(dtmpath))
+  {
+    PanicAlertFmtT("No undo.dtm found, aborting undo load state to prevent movie desyncs");
+    return false;
+  }
+
+  const bool loaded = LoadFromBuffer(system, s_undo_load_buffer);
+  movie.LoadInput(dtmpath);
+  return loaded;
+}
+
 static void LoadAsFromCore(Core::System& system, std::string filename)
 {
   // Ensure all data has reached the filesystem before trying to use it.
@@ -835,6 +872,7 @@ static void LoadAsFromCore(Core::System& system, std::string filename)
 
   bool was_file_read = false;
   bool loaded_successfully = false;
+  bool load_gate_admitted = false;
 
   // brackets here are so buffer gets freed ASAP
   {
@@ -844,13 +882,17 @@ static void LoadAsFromCore(Core::System& system, std::string filename)
     if (!buffer.empty())
     {
       was_file_read = true;
-      loaded_successfully = LoadFromBuffer(system, buffer);
+      load_gate_admitted = BeginSavestateLoad();
+      if (load_gate_admitted)
+        loaded_successfully = LoadFromBuffer(system, buffer);
     }
   }
 
   if (was_file_read)
   {
-    if (loaded_successfully)
+    // When the gate rejects an attempt, the buffer was never applied. Loading the undo buffer would
+    // itself be an unwanted mutation, and it may be stale when movie startup skipped refreshing it.
+    if (load_gate_admitted && loaded_successfully)
     {
       const std::filesystem::path temp_filename(StringToPath(filename));
       Core::DisplayMessage(
@@ -865,14 +907,17 @@ static void LoadAsFromCore(Core::System& system, std::string filename)
         movie.EndPlayInput(false);
       }
     }
-    else
+    else if (load_gate_admitted)
     {
       Core::DisplayMessage("The savestate could not be loaded", OSD::Duration::NORMAL);
 
       // since we could be in an inconsistent state now (and might crash or whatever), undo.
-      UndoLoadState(system);
+      UndoLoadStateFromCore(system);
     }
   }
+
+  if (load_gate_admitted)
+    Core::NotifySavestateLoadFinished(loaded_successfully);
 
   if (s_on_after_load_callback)
     s_on_after_load_callback();
@@ -968,31 +1013,9 @@ void UndoLoadState(Core::System& system)
     return;
 
   Core::RunOnCPUThread(system, [&system] {
-    if (s_undo_load_buffer.empty())
-    {
-      PanicAlertFmtT("There is nothing to undo!");
+    if (!BeginSavestateLoad())
       return;
-    }
-
-    auto& movie = system.GetMovie();
-    if (movie.IsMovieActive())
-    {
-      // Note: Only the CPU thread writes to "undo.dtm".
-      const std::string dtmpath = File::GetUserPath(D_STATESAVES_IDX) + "undo.dtm";
-      if (File::Exists(dtmpath))
-      {
-        LoadFromBuffer(system, s_undo_load_buffer);
-        movie.LoadInput(dtmpath);
-      }
-      else
-      {
-        PanicAlertFmtT("No undo.dtm found, aborting undo load state to prevent movie desyncs");
-      }
-    }
-    else
-    {
-      LoadFromBuffer(system, s_undo_load_buffer);
-    }
+    Core::NotifySavestateLoadFinished(UndoLoadStateFromCore(system));
   });
 }
 

@@ -247,6 +247,7 @@ private:
   bool m_rendering_to_main;
   bool m_stop_confirm_showing = false;
   bool m_stop_requested = false;
+  bool m_boot_in_progress = false;
   bool m_exit_requested = false;
   bool m_fullscreen_requested = false;
   bool m_is_screensaver_inhibited = false;

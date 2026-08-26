@@ -161,6 +161,25 @@ void OnFrameEnd(Core::System& system);
 void RunOnCPUThread(Core::System& system, Common::MoveOnlyFunction<void()> function);
 
 // for calling back into UI code without introducing a dependency on it in core
+// Fired by BootManager after game metadata and per-game configuration are available, but before
+// System/graphics initialization begins. Listeners may perform a blocking launch gate and should
+// bound any external work.
+using BeforeBootCallbackFunc = std::function<void()>;
+
+[[nodiscard]] Common::EventHook AddOnBeforeBootCallback(BeforeBootCallbackFunc callback);
+bool NotifyBeforeBoot();
+// A launch-gate callback may use this only when continuing would open known-unsafe local state.
+void RequestBootCancellation();
+
+// Fired after the corresponding launch gate once Core::Init has either committed the boot or
+// rejected it. This lets launch gates release state on the failure path, where no State callback
+// is emitted.
+using BootAttemptFinishedCallbackFunc = std::function<void(bool)>;
+
+[[nodiscard]] Common::EventHook
+AddOnBootAttemptFinishedCallback(BootAttemptFinishedCallbackFunc callback);
+void NotifyBootAttemptFinished(bool started);
+
 using StateChangedCallbackFunc = std::function<void(Core::State)>;
 
 [[nodiscard]] Common::EventHook AddOnStateChangedCallback(StateChangedCallbackFunc callback);
@@ -180,6 +199,21 @@ using SavestateLoadedCallbackFunc = std::function<void()>;
 
 [[nodiscard]] Common::EventHook AddOnSavestateLoadedCallback(SavestateLoadedCallbackFunc callback);
 void NotifySavestateLoaded();
+
+// A savestate can mutate independently flushed save devices before the complete state validates.
+// This gate runs synchronously before any deserialization and may cancel the attempt when a
+// listener cannot first persist the safety state it needs. The matching finished event is emitted
+// for every admitted or rejected attempt so listeners can release held serialization gates.
+using BeforeSavestateLoadCallbackFunc = std::function<void()>;
+using SavestateLoadFinishedCallbackFunc = std::function<void(bool)>;
+
+[[nodiscard]] Common::EventHook
+AddOnBeforeSavestateLoadCallback(BeforeSavestateLoadCallbackFunc callback);
+bool NotifyBeforeSavestateLoad();
+void RequestSavestateLoadCancellation();
+[[nodiscard]] Common::EventHook
+AddOnSavestateLoadFinishedCallback(SavestateLoadFinishedCallbackFunc callback);
+void NotifySavestateLoadFinished(bool loaded);
 
 void UpdateWantDeterminism(Core::System& system, bool initial = false);
 

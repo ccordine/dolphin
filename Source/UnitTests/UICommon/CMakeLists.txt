@@ -1,0 +1,1 @@
+add_dolphin_test(EmuBankSyncPolicyTest EmuBankSyncPolicyTest.cpp)

@@ -98,8 +98,14 @@ static bool s_wants_determinism;
 // Declarations and definitions
 static std::thread s_emu_thread;
 static Common::HookableEvent<Core::State> s_state_changed_event;
+static Common::HookableEvent<> s_before_boot_event;
+static std::atomic<bool> s_boot_cancellation_requested = false;
+static Common::HookableEvent<bool> s_boot_attempt_finished_event;
 static Common::HookableEvent<> s_save_data_changed_event;
 static Common::HookableEvent<> s_savestate_loaded_event;
+static Common::HookableEvent<> s_before_savestate_load_event;
+static std::atomic<bool> s_savestate_load_cancellation_requested = false;
+static Common::HookableEvent<bool> s_savestate_load_finished_event;
 
 static bool s_is_throttler_temp_disabled = false;
 static bool s_frame_step = false;
@@ -935,6 +941,33 @@ Common::EventHook AddOnStateChangedCallback(StateChangedCallbackFunc callback)
   return s_state_changed_event.Register(std::move(callback));
 }
 
+Common::EventHook AddOnBeforeBootCallback(BeforeBootCallbackFunc callback)
+{
+  return s_before_boot_event.Register(std::move(callback));
+}
+
+bool NotifyBeforeBoot()
+{
+  s_boot_cancellation_requested.store(false, std::memory_order_release);
+  s_before_boot_event.Trigger();
+  return !s_boot_cancellation_requested.load(std::memory_order_acquire);
+}
+
+void RequestBootCancellation()
+{
+  s_boot_cancellation_requested.store(true, std::memory_order_release);
+}
+
+Common::EventHook AddOnBootAttemptFinishedCallback(BootAttemptFinishedCallbackFunc callback)
+{
+  return s_boot_attempt_finished_event.Register(std::move(callback));
+}
+
+void NotifyBootAttemptFinished(const bool started)
+{
+  s_boot_attempt_finished_event.Trigger(started);
+}
+
 void NotifyStateChanged(const Core::State state)
 {
   s_state_changed_event.Trigger(state);
@@ -958,6 +991,33 @@ Common::EventHook AddOnSavestateLoadedCallback(SavestateLoadedCallbackFunc callb
 void NotifySavestateLoaded()
 {
   s_savestate_loaded_event.Trigger();
+}
+
+Common::EventHook AddOnBeforeSavestateLoadCallback(BeforeSavestateLoadCallbackFunc callback)
+{
+  return s_before_savestate_load_event.Register(std::move(callback));
+}
+
+bool NotifyBeforeSavestateLoad()
+{
+  s_savestate_load_cancellation_requested.store(false, std::memory_order_release);
+  s_before_savestate_load_event.Trigger();
+  return !s_savestate_load_cancellation_requested.load(std::memory_order_acquire);
+}
+
+void RequestSavestateLoadCancellation()
+{
+  s_savestate_load_cancellation_requested.store(true, std::memory_order_release);
+}
+
+Common::EventHook AddOnSavestateLoadFinishedCallback(SavestateLoadFinishedCallbackFunc callback)
+{
+  return s_savestate_load_finished_event.Register(std::move(callback));
+}
+
+void NotifySavestateLoadFinished(const bool loaded)
+{
+  s_savestate_load_finished_event.Trigger(loaded);
 }
 
 void UpdateWantDeterminism(Core::System& system, bool initial)

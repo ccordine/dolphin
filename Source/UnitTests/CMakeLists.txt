@@ -22,4 +22,5 @@ endmacro()
 
 add_subdirectory(Common)
 add_subdirectory(Core)
+add_subdirectory(UICommon)
 add_subdirectory(VideoCommon)

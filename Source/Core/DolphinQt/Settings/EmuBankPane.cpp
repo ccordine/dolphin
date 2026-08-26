@@ -77,7 +77,11 @@ EmuBankPane::EmuBankPane(QWidget* parent) : QWidget(parent)
 
   m_sync_interval = new ConfigInteger(30, 300, Config::MAIN_EMUBANK_SYNC_INTERVAL, 30);
   m_sync_interval->setSuffix(tr(" seconds"));
-  behavior_layout->addRow(tr("Check interval:"), m_sync_interval);
+  m_sync_interval->setToolTip(
+      tr("Minimum time between automatic sync attempts, including in-game save uploads. Sync "
+         "Now, a newly authorized connection, pre-launch checks, and final shutdown syncs can "
+         "run immediately."));
+  behavior_layout->addRow(tr("Minimum auto-sync interval:"), m_sync_interval);
 
   m_sync_now = new QPushButton(tr("Sync Now"));
   behavior_layout->addRow(m_sync_now);

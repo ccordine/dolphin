@@ -1003,8 +1003,8 @@ It can efficiently compress both junk data and encrypted Wii data.
     <string name="emubank_allow_insecure_description">Permit sending the device credential without TLS. Use only on a network you trust.</string>
     <string name="emubank_live_sync">Upload live save changes</string>
     <string name="emubank_live_sync_description">Debounce and upload stable local save changes while a game is running. Remote changes wait until emulation stops.</string>
-    <string name="emubank_sync_interval">Check interval</string>
-    <string name="emubank_sync_interval_description">How frequently Dolphin checks cloud changes while no game is running. In-game uploads are triggered by save writes.</string>
+    <string name="emubank_sync_interval">Minimum auto-sync interval</string>
+    <string name="emubank_sync_interval_description">Minimum time between automatic sync attempts, including in-game save uploads. Manual, newly authorized, pre-launch, and final shutdown syncs can still run immediately.</string>
     <string name="emubank_sync_now">Sync now</string>
     <string name="emubank_sync_now_description">Request a sync. Downloads are deferred automatically if emulation is active.</string>
     <string name="emubank_sync_requested">EmuBank sync requested</string>

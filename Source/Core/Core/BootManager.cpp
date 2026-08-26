@@ -17,11 +17,14 @@
 
 #include "Core/BootManager.h"
 
+#include <atomic>
+
 #include <fmt/format.h>
 
 #include "Common/CommonTypes.h"
 #include "Common/Config/Config.h"
 #include "Common/FileUtil.h"
+#include "Common/ScopeGuard.h"
 
 #include "Core/AchievementManager.h"
 #include "Core/Boot/Boot.h"
@@ -44,6 +47,21 @@
 
 namespace BootManager
 {
+namespace
+{
+std::atomic_flag s_boot_in_progress;
+
+void ClearBootConfigLayers()
+{
+  Config::ClearCurrentRunLayer();
+  Config::RemoveLayer(Config::LayerType::Movie);
+  Config::RemoveLayer(Config::LayerType::Netplay);
+  Config::RemoveLayer(Config::LayerType::GlobalGame);
+  Config::RemoveLayer(Config::LayerType::LocalGame);
+  SConfig::GetInstance().ResetRunningGameMetadata();
+}
+}  // namespace
+
 // Boot the ISO or file
 bool BootCore(Core::System& system, std::unique_ptr<BootParameters> boot,
               const WindowSystemInfo& wsi)
@@ -51,31 +69,16 @@ bool BootCore(Core::System& system, std::unique_ptr<BootParameters> boot,
   if (!boot)
     return false;
 
+  // Before-boot listeners may keep a frontend event loop responsive. Reject a recursively queued
+  // boot before it can replace SConfig metadata belonging to the attempt already in progress.
+  if (s_boot_in_progress.test_and_set(std::memory_order_acq_rel))
+    return false;
+  Common::ScopeGuard boot_guard{[] { s_boot_in_progress.clear(std::memory_order_release); }};
+
   SConfig& StartUp = SConfig::GetInstance();
 
   if (!StartUp.SetPathsAndGameMetadata(system, *boot))
     return false;
-
-  // Movie settings
-  auto& movie = system.GetMovie();
-  if (movie.IsPlayingInput() && movie.IsConfigSaved())
-  {
-    for (ExpansionInterface::Slot slot : ExpansionInterface::MEMCARD_SLOTS)
-    {
-      if (movie.IsUsingMemcard(slot) && movie.IsStartingFromClearSave() && !system.IsWii())
-      {
-        const auto raw_path =
-            File::GetUserPath(D_GCUSER_IDX) +
-            fmt::format("Movie{}.raw", slot == ExpansionInterface::Slot::A ? 'A' : 'B');
-        if (File::Exists(raw_path))
-          File::Delete(raw_path);
-
-        const auto movie_path = File::GetUserPath(D_GCUSER_IDX) + "Movie";
-        if (File::Exists(movie_path))
-          File::DeleteDirRecursively(movie_path);
-      }
-    }
-  }
 
   if (NetPlay::IsNetPlayRunning())
   {
@@ -156,6 +159,39 @@ bool BootCore(Core::System& system, std::unique_ptr<BootParameters> boot,
     }
   }
 
+  // Run frontend launch gates before System or graphics initialization. In particular, cloud-save
+  // reconciliation must finish before a memory card and render backend are opened; blocking from
+  // State::Starting is too late and can stall a partially initialized backend.
+  if (!Core::NotifyBeforeBoot())
+  {
+    ClearBootConfigLayers();
+    Core::NotifyBootAttemptFinished(false);
+    return false;
+  }
+
+  // Movie clear-save setup mutates the shared GC save namespace. Keep it behind the launch gate so
+  // another Dolphin that cannot acquire EmuBank's process lock cannot delete the active owner's
+  // files before its boot is canceled.
+  auto& movie = system.GetMovie();
+  if (movie.IsPlayingInput() && movie.IsConfigSaved())
+  {
+    for (ExpansionInterface::Slot slot : ExpansionInterface::MEMCARD_SLOTS)
+    {
+      if (movie.IsUsingMemcard(slot) && movie.IsStartingFromClearSave() && !system.IsWii())
+      {
+        const auto raw_path =
+            File::GetUserPath(D_GCUSER_IDX) +
+            fmt::format("Movie{}.raw", slot == ExpansionInterface::Slot::A ? 'A' : 'B');
+        if (File::Exists(raw_path))
+          File::Delete(raw_path);
+
+        const auto movie_path = File::GetUserPath(D_GCUSER_IDX) + "Movie";
+        if (File::Exists(movie_path))
+          File::DeleteDirRecursively(movie_path);
+      }
+    }
+  }
+
   system.Initialize();
 
   Core::UpdateWantDeterminism(system, /*initial*/ true);
@@ -187,9 +223,10 @@ bool BootCore(Core::System& system, std::unique_ptr<BootParameters> boot,
 
   const bool load_ipl = !system.IsWii() && !Config::Get(Config::MAIN_SKIP_IPL) &&
                         std::holds_alternative<BootParameters::Disc>(boot->parameters);
+  bool started = false;
   if (load_ipl)
   {
-    return Core::Init(
+    started = Core::Init(
         system,
         std::make_unique<BootParameters>(
             BootParameters::IPL{StartUp.m_region,
@@ -197,7 +234,12 @@ bool BootCore(Core::System& system, std::unique_ptr<BootParameters> boot,
             std::move(boot->boot_session_data)),
         wsi);
   }
-  return Core::Init(system, std::move(boot), wsi);
+  else
+  {
+    started = Core::Init(system, std::move(boot), wsi);
+  }
+  Core::NotifyBootAttemptFinished(started);
+  return started;
 }
 
 void RestoreConfig()
@@ -214,12 +256,7 @@ void RestoreConfig()
     ConfigLoaders::TransferSYSCONFControlFromGuest(ConfigLoaders::WriteBackChangedValues::Yes);
   }
 
-  Config::ClearCurrentRunLayer();
-  Config::RemoveLayer(Config::LayerType::Movie);
-  Config::RemoveLayer(Config::LayerType::Netplay);
-  Config::RemoveLayer(Config::LayerType::GlobalGame);
-  Config::RemoveLayer(Config::LayerType::LocalGame);
-  SConfig::GetInstance().ResetRunningGameMetadata();
+  ClearBootConfigLayers();
 }
 
 }  // namespace BootManager
