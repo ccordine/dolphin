@@ -49,6 +49,14 @@ Dolphin never replaces any bound file while emulation is active.
   recovery transaction on older Android storage. It keeps a content-addressed backup of every
   divergent local file and only downloads while emulation is stopped. A concurrent writer's inode
   is retained instead of being destroyed by the cloud install.
+- Uploads larger than 512 KiB are sent as independently SHA-256-verified 512 KiB chunks. EmuBank
+  stages chunks only under the authenticated device and binding, reassembles them in index order,
+  verifies the declared whole-file size and SHA-256, and only then runs the normal revision and
+  conflict transaction. A completed upload removes its staging directory. Repeated identical
+  chunks are idempotent, and each receipt identifies the first missing part so a later bounded sync
+  pass resumes rather than retransmitting the whole prefix. A newer local snapshot replaces an
+  abandoned partial body for that binding, and small saves retain the legacy one-request protocol
+  for older servers.
 - Before a game launches, Dolphin performs a blocking reconciliation. A recorded common hash is
   authoritative: if only the cloud changed, that revision is restored; if only the local file
   changed, it is uploaded. When no common hash can decide the winner, a local write clearly newer
@@ -128,12 +136,13 @@ Dolphin never replaces any bound file while emulation is active.
   file is accepted only if its size and modification time remain stable throughout the read.
   Dolphin does not periodically fetch and hash every binding during play; event-driven retries and
   the final stopped pass provide catch-up.
-  The configured interval is a minimum delay between all automatic attempts, including failed live
-  retries, savestate notifications, and configuration changes, so a 180-second setting cannot
-  collapse into a tight retry loop. Manual Sync Now, a newly authorized connection, pre-launch
-  checks, and final shutdown syncs may bypass that delay. Remote changes remain pending until
-  emulation stops. Raw cards inherit Dolphin's normal flush cadence (up to about 15 seconds); GCI
-  Folder mode provides finer-grained updates.
+  Each newly flushed live-save generation bypasses the configured interval and starts its first
+  background upload attempt after the quiet period. Failed live retries, periodic stopped checks,
+  savestate notifications, and configuration changes remain cadence-limited, so an unreachable
+  server cannot create a tight retry loop. Manual Sync Now, a newly authorized connection,
+  pre-launch checks, and final shutdown syncs may also bypass that delay. Remote changes remain
+  pending until emulation stops. Raw cards inherit Dolphin's normal flush cadence (up to about 15
+  seconds); GCI Folder mode provides finer-grained updates.
 - Automatic checks run while the Dolphin process is alive. Android may stop an idle process; the
   pre-launch sync catches up the next time Dolphin starts a game.
 - Android performs a bounded final sync after Core shutdown, when all save files have closed, and

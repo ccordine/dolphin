@@ -51,6 +51,51 @@ TEST(EmuBankSyncPolicy, AutomaticWorkCannotBypassConfiguredCadence)
   EXPECT_EQ(MinimumAutomaticDeadline(start, 180s, start + 181s), start + 181s);
 }
 
+TEST(EmuBankSyncPolicy, FreshLiveSaveBypassesCadenceButRetryDoesNot)
+{
+  const std::chrono::steady_clock::time_point start{1000s};
+  const auto quiet_deadline = start + 2s;
+
+  EXPECT_EQ(SaveEventAutomaticDeadline(start, 300s, quiet_deadline, true), quiet_deadline);
+  EXPECT_EQ(SaveEventAutomaticDeadline(start, 300s, quiet_deadline, false), start + 300s);
+  EXPECT_EQ(SaveEventAutomaticDeadline(std::nullopt, 300s, quiet_deadline, false), quiet_deadline);
+  EXPECT_EQ(SaveEventAutomaticDeadline(start, 30s, start + 31s, false), start + 31s);
+}
+
+TEST(EmuBankSyncPolicy, SaveEventAttemptGenerationsPreserveOnlyFreshBypasses)
+{
+  constexpr std::uint64_t consumed = 4;
+  constexpr std::uint64_t first_save = 7;
+
+  EXPECT_TRUE(FreshLiveSaveEventPending(true, consumed, first_save));
+  EXPECT_FALSE(FreshLiveSaveEventPending(false, consumed, first_save));
+
+  // An unrelated live pass inside the quiet window covers only the consumed generation, so the
+  // new save keeps its immediate first attempt even though that pass updates the last-sync time.
+  const std::uint64_t covered_while_changing =
+      CoveredSaveGeneration(true, false, consumed, first_save);
+  EXPECT_EQ(covered_while_changing, consumed);
+  EXPECT_EQ(AdvanceAttemptedSaveGeneration(consumed, covered_while_changing), consumed);
+  EXPECT_TRUE(FreshLiveSaveEventPending(true, consumed, first_save));
+
+  // Success and failure both spend generation 7's first attempt. Failure leaves it unconsumed,
+  // but that same generation must retry at cadence rather than spinning immediately.
+  const std::uint64_t attempted = AdvanceAttemptedSaveGeneration(consumed, first_save);
+  EXPECT_EQ(attempted, first_save);
+  EXPECT_FALSE(FreshLiveSaveEventPending(true, attempted, first_save));
+
+  // A save arriving during or after that pass advances the latest generation and therefore gets
+  // a new immediate attempt after its own quiet period.
+  EXPECT_TRUE(FreshLiveSaveEventPending(true, attempted, first_save + 1));
+
+  // A stopped or pre-launch pass covers the pending generation even if it fails. Starting the
+  // next game cannot make the old event fresh again.
+  const std::uint64_t stopped_covered = CoveredSaveGeneration(false, false, consumed, first_save);
+  EXPECT_EQ(stopped_covered, first_save);
+  EXPECT_FALSE(FreshLiveSaveEventPending(
+      true, AdvanceAttemptedSaveGeneration(consumed, stopped_covered), first_save));
+}
+
 TEST(EmuBankSyncPolicy, UnrelatedLivePassCannotConsumeSaveBurstInsideQuietPeriod)
 {
   const std::chrono::steady_clock::time_point start{1000s};
@@ -62,6 +107,19 @@ TEST(EmuBankSyncPolicy, UnrelatedLivePassCannotConsumeSaveBurstInsideQuietPeriod
   EXPECT_EQ(CoveredSaveGeneration(true, false, 4, 7), 4u);
   EXPECT_EQ(CoveredSaveGeneration(true, true, 4, 7), 7u);
   EXPECT_EQ(CoveredSaveGeneration(false, false, 4, 7), 7u);
+}
+
+TEST(EmuBankSyncPolicy, OnlyCompleteLegacySelectorSchemaMayOmitArrays)
+{
+  // The deployed legacy v1 state contains none of these fields. Every partially present schema
+  // remains invalid so compatibility cannot turn a torn current-state write into trusted input.
+  for (unsigned int present_fields = 0; present_fields < 16; ++present_fields)
+  {
+    const bool arrays_may_be_omitted =
+        DurableSelectorArraysMayBeOmitted((present_fields & 1) != 0, (present_fields & 2) != 0,
+                                          (present_fields & 4) != 0, (present_fields & 8) != 0);
+    EXPECT_EQ(arrays_may_be_omitted, present_fields == 0) << present_fields;
+  }
 }
 
 TEST(EmuBankSyncPolicy, ResolverAuthorizationExpiresWhenLocalSaveChanges)

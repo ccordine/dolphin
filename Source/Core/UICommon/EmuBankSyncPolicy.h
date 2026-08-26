@@ -93,6 +93,32 @@ MinimumAutomaticDeadline(std::optional<std::chrono::steady_clock::time_point> la
   return std::max(requested_at, *last_attempt + interval);
 }
 
+constexpr std::chrono::steady_clock::time_point
+SaveEventAutomaticDeadline(std::optional<std::chrono::steady_clock::time_point> last_attempt,
+                           std::chrono::seconds interval,
+                           std::chrono::steady_clock::time_point quiet_deadline,
+                           bool unattempted_live_save_event)
+{
+  // A newly flushed in-game save is the payload Live Sync exists to protect. Its first upload
+  // attempt begins as soon as the save has stayed quiet long enough to snapshot safely; the
+  // configured automatic cadence still rate-limits retries and stopped-emulation housekeeping.
+  if (unattempted_live_save_event)
+    return quiet_deadline;
+  return MinimumAutomaticDeadline(last_attempt, interval, quiet_deadline);
+}
+
+constexpr bool FreshLiveSaveEventPending(bool emulation_active, std::uint64_t attempted_generation,
+                                         std::uint64_t latest_generation)
+{
+  return emulation_active && latest_generation > attempted_generation;
+}
+
+constexpr std::uint64_t AdvanceAttemptedSaveGeneration(std::uint64_t attempted_generation,
+                                                       std::uint64_t covered_generation)
+{
+  return std::max(attempted_generation, covered_generation);
+}
+
 constexpr bool
 LiveSaveEventsReady(bool save_event_pending,
                     std::optional<std::chrono::steady_clock::time_point> quiet_deadline,
@@ -106,6 +132,16 @@ constexpr std::uint64_t CoveredSaveGeneration(bool pass_is_live, bool live_save_
                                               std::uint64_t latest_generation)
 {
   return pass_is_live && !live_save_events_ready ? consumed_generation : latest_generation;
+}
+
+// The original version-1 durable-state writer predated scoped savestate invalidation and emitted
+// none of these four fields. Only that complete legacy shape may omit the selector arrays. Once
+// any selector-era field is present, requiring both arrays keeps a torn or manually damaged state
+// file from silently broadening an invalidation to the wrong game or save path.
+constexpr bool DurableSelectorArraysMayBeOmitted(bool has_pending, bool has_selectors_complete,
+                                                 bool has_game_selectors, bool has_path_selectors)
+{
+  return !has_pending && !has_selectors_complete && !has_game_selectors && !has_path_selectors;
 }
 
 constexpr bool ResolverLocalMatches(bool expected_present, std::string_view expected_sha256,

@@ -103,6 +103,11 @@ constexpr size_t MAX_PROCESS_LOCK_STABILIZATION_ATTEMPTS = 4;
 constexpr u64 MAX_DURABLE_STATE_FILE_SIZE = 32 * 1024 * 1024;
 constexpr u64 MAX_RECOVERY_JOURNAL_FILE_SIZE = 8 * 1024 * 1024;
 constexpr u64 MAX_SAVE_SIZE = 64 * 1024 * 1024;
+// Keep each request comfortably below the common 1 MiB reverse-proxy default. Small saves retain
+// the legacy single-request protocol so new clients remain compatible with older EmuBank servers.
+constexpr size_t UPLOAD_CHUNK_SIZE = 512 * 1024;
+constexpr size_t CHUNKED_UPLOAD_THRESHOLD = UPLOAD_CHUNK_SIZE;
+constexpr u64 MAX_UPLOAD_RESPONSE_SIZE = 256 * 1024;
 constexpr size_t CONFIRMATION_READ_CHUNK_SIZE = 1024 * 1024;
 constexpr std::string_view ZERO_SHA256 =
     "0000000000000000000000000000000000000000000000000000000000000000";
@@ -1325,6 +1330,34 @@ std::optional<Revision> ParseUploadRevision(std::span<const u8> body)
   if (revision_it == data->end())
     return std::nullopt;
   return ParseRevision(revision_it->second);
+}
+
+struct UploadChunkReceipt
+{
+  size_t chunk_count;
+  size_t received_index;
+  size_t next_index;
+};
+
+std::optional<UploadChunkReceipt> ParseUploadChunkReceipt(std::span<const u8> body,
+                                                          size_t expected_chunk_count)
+{
+  picojson::value root;
+  const picojson::object* root_object = ParseJsonObject(body, &root);
+  const picojson::object* data = root_object ? ObjectValue(*root_object, "data") : nullptr;
+  const std::optional<int> chunk_count = data ? ObjectInteger(*data, "chunk_count") : std::nullopt;
+  const std::optional<int> received_index =
+      data ? ObjectInteger(*data, "received_index") : std::nullopt;
+  const std::optional<int> next_index = data ? ObjectInteger(*data, "next_index") : std::nullopt;
+  if (!chunk_count || !received_index || !next_index || *chunk_count < 1 || *received_index < 0 ||
+      *next_index < 0 || static_cast<size_t>(*chunk_count) != expected_chunk_count ||
+      static_cast<size_t>(*received_index) >= expected_chunk_count ||
+      static_cast<size_t>(*next_index) > expected_chunk_count)
+  {
+    return std::nullopt;
+  }
+  return UploadChunkReceipt{static_cast<size_t>(*chunk_count), static_cast<size_t>(*received_index),
+                            static_cast<size_t>(*next_index)};
 }
 
 bool IsAllowedSaveName(std::string filename)
@@ -3578,8 +3611,11 @@ private:
       const bool save_event_pending = m_save_event_generation > m_consumed_save_event_generation;
       if (automatic_sync_enabled && save_event_pending && m_save_sync_deadline)
       {
-        include_automatic_deadline(Policy::MinimumAutomaticDeadline(
-            m_last_automatic_sync, std::chrono::seconds{interval}, *m_save_sync_deadline));
+        const bool unattempted_live_save_event = Policy::FreshLiveSaveEventPending(
+            emulation_active, m_attempted_save_event_generation, m_save_event_generation);
+        include_automatic_deadline(Policy::SaveEventAutomaticDeadline(
+            m_last_automatic_sync, std::chrono::seconds{interval}, *m_save_sync_deadline,
+            unattempted_live_save_event));
       }
       if (automatic_sync_enabled && live_retry)
       {
@@ -3631,9 +3667,11 @@ private:
 
       const SyncMode mode = pass_is_live ? SyncMode::Live : SyncMode::Idle;
       bool sync_completed = true;
+      bool sync_attempted = false;
       if (mode != SyncMode::Live || Config::Get(Config::MAIN_EMUBANK_LIVE_SYNC) ||
           !Config::Get(Config::MAIN_EMUBANK_ENABLED))
       {
+        sync_attempted = true;
         sync_completed = SyncOnce(mode, std::nullopt, live_uploads_open, false, request_generation);
       }
       else
@@ -3646,6 +3684,14 @@ private:
       }
 
       lock.lock();
+      if (sync_attempted)
+      {
+        // Record every admitted attempt, including a failed stopped pass, so an old save event
+        // cannot regain a cadence bypass when the next game starts. A later generation remains
+        // fresh and gets its own immediate first attempt.
+        m_attempted_save_event_generation = Policy::AdvanceAttemptedSaveGeneration(
+            m_attempted_save_event_generation, covered_save_generation);
+      }
       m_completed_generation = std::max(m_completed_generation, request_generation);
       if (sync_completed)
       {
@@ -3665,6 +3711,8 @@ private:
   {
     {
       std::lock_guard lock(m_wake_mutex);
+      m_attempted_save_event_generation = Policy::AdvanceAttemptedSaveGeneration(
+          m_attempted_save_event_generation, covered_save_generation);
       m_completed_generation = std::max(m_completed_generation, covered_request_generation);
       if (sync_completed)
       {
@@ -5714,13 +5762,120 @@ private:
     DisplaySyncMessage(
         fmt::format("EmuBank: backing up {}...", BindingDisplayName(binding.relative_path)), 3000);
 
-    Common::HttpRequest request(
-        HttpTimeoutUntil(m_sync_deadline),
-        LimitTransfer(MAX_SAVE_SIZE, snapshot.contents.size(), m_sync_deadline,
-                      mode == SyncMode::BeforeLaunch ? nullptr : &m_launch_pending,
-                      &m_config_changed_during_sync));
-    const auto response = request.Post(BindingUrl(connection, binding), snapshot.contents, headers,
-                                       Common::HttpRequest::AllowedReturnCodes::All);
+    Common::HttpRequest::Response response;
+    s32 response_code = 0;
+    const auto post_legacy_upload = [&] {
+      Common::HttpRequest request(
+          HttpTimeoutUntil(m_sync_deadline),
+          LimitTransfer(MAX_UPLOAD_RESPONSE_SIZE, snapshot.contents.size(), m_sync_deadline,
+                        mode == SyncMode::BeforeLaunch ? nullptr : &m_launch_pending,
+                        &m_config_changed_during_sync));
+      response = request.Post(BindingUrl(connection, binding), snapshot.contents, headers,
+                              Common::HttpRequest::AllowedReturnCodes::All);
+      response_code = request.GetLastResponseCode();
+    };
+
+    bool use_legacy_upload = snapshot.contents.size() <= CHUNKED_UPLOAD_THRESHOLD;
+    if (!use_legacy_upload)
+    {
+      const size_t chunk_count =
+          (snapshot.contents.size() + UPLOAD_CHUNK_SIZE - 1) / UPLOAD_CHUNK_SIZE;
+      const std::span<const u8> contents{snapshot.contents};
+      Common::HttpRequest chunk_request(
+          HttpTimeoutUntil(m_sync_deadline),
+          LimitTransfer(MAX_UPLOAD_RESPONSE_SIZE, UPLOAD_CHUNK_SIZE, m_sync_deadline,
+                        mode == SyncMode::BeforeLaunch ? nullptr : &m_launch_pending,
+                        &m_config_changed_during_sync));
+      size_t index = 0;
+      size_t chunk_requests = 0;
+      const size_t max_chunk_requests = chunk_count * 2 + 1;
+      while (index < chunk_count)
+      {
+        if (++chunk_requests > max_chunk_requests)
+        {
+          ERROR_LOG_FMT(CORE, "EmuBank: too many chunk cursor transitions for '{}'",
+                        binding.relative_path);
+          ++stats->errors;
+          return UploadResult::Failed;
+        }
+        const size_t offset = index * UPLOAD_CHUNK_SIZE;
+        const std::span<const u8> chunk =
+            contents.subspan(offset, std::min(UPLOAD_CHUNK_SIZE, contents.size() - offset));
+        auto chunk_headers = Headers(connection);
+        chunk_headers["Content-Type"] = "application/octet-stream";
+        chunk_headers["X-EmuBank-Upload-Size"] = fmt::to_string(snapshot.contents.size());
+        chunk_headers["X-EmuBank-Chunk-Sha256"] = CalculateSha256(chunk);
+
+        SetStatus(fmt::format("EmuBank is uploading {} (part {}/{})…",
+                              BindingDisplayName(binding.relative_path), index + 1, chunk_count));
+        const auto chunk_response =
+            chunk_request.Post(fmt::format("{}/uploads/{}/chunks/{}",
+                                           BindingUrl(connection, binding), snapshot.sha256, index),
+                               chunk, chunk_headers, Common::HttpRequest::AllowedReturnCodes::All);
+        const s32 chunk_response_code = chunk_request.GetLastResponseCode();
+
+        // The first request cleanly distinguishes an older EmuBank deployment. Its existing raw
+        // endpoint may still accept this file when that deployment has a larger ingress limit.
+        if (index == 0 && chunk_response &&
+            (chunk_response_code == 404 || chunk_response_code == 405))
+        {
+          use_legacy_upload = true;
+          break;
+        }
+        if (!chunk_response || (chunk_response_code != 200 && chunk_response_code != 201))
+        {
+          if (!ConnectionStillConfigured(connection))
+          {
+            ++stats->deferred;
+            stats->retry_needed = true;
+            return UploadResult::Failed;
+          }
+          ERROR_LOG_FMT(CORE, "EmuBank: failed to upload part {} of '{}' (HTTP {})", index + 1,
+                        binding.relative_path, chunk_response_code);
+          ++stats->errors;
+          DisplaySyncMessage(
+              fmt::format("EmuBank failed to upload {}", BindingDisplayName(binding.relative_path)),
+              5000, OsdTone::Error);
+          return UploadResult::Failed;
+        }
+        if (!ConnectionStillConfigured(connection))
+        {
+          ++stats->deferred;
+          stats->retry_needed = true;
+          return UploadResult::Failed;
+        }
+        const std::optional<UploadChunkReceipt> receipt =
+            ParseUploadChunkReceipt(*chunk_response, chunk_count);
+        if (!receipt || receipt->received_index != index || receipt->next_index == index)
+        {
+          ERROR_LOG_FMT(CORE, "EmuBank: invalid chunk receipt for '{}' after part {}",
+                        binding.relative_path, index + 1);
+          ++stats->errors;
+          return UploadResult::Failed;
+        }
+        // The server reports the first missing part. A forward jump resumes a verified prefix; a
+        // bounded rewind repairs a part that disappeared while this pass was active.
+        index = receipt->next_index;
+      }
+
+      if (!use_legacy_upload)
+      {
+        headers["X-EmuBank-Upload-Size"] = fmt::to_string(snapshot.contents.size());
+        Common::HttpRequest complete_request(
+            HttpTimeoutUntil(m_sync_deadline),
+            LimitTransfer(MAX_UPLOAD_RESPONSE_SIZE, 0, m_sync_deadline,
+                          mode == SyncMode::BeforeLaunch ? nullptr : &m_launch_pending,
+                          &m_config_changed_during_sync));
+        response = complete_request.Post(
+            fmt::format("{}/uploads/{}/complete", BindingUrl(connection, binding), snapshot.sha256),
+            std::span<const u8>{}, headers, Common::HttpRequest::AllowedReturnCodes::All);
+        response_code = complete_request.GetLastResponseCode();
+      }
+    }
+
+    if (use_legacy_upload)
+      post_legacy_upload();
+
     if (!response)
     {
       if (!ConnectionStillConfigured(connection))
@@ -5741,7 +5896,7 @@ private:
       stats->retry_needed = true;
       return UploadResult::Failed;
     }
-    if (request.GetLastResponseCode() == 409)
+    if (response_code == 409)
     {
       ++stats->conflicts;
       m_pending_uploads.erase(binding.id);
@@ -5778,10 +5933,10 @@ private:
                          6000, OsdTone::Warning);
       return UploadResult::Conflict;
     }
-    if (request.GetLastResponseCode() != 200)
+    if (response_code != 200)
     {
       ERROR_LOG_FMT(CORE, "EmuBank: failed to upload '{}' (HTTP {})", binding.relative_path,
-                    request.GetLastResponseCode());
+                    response_code);
       ++stats->errors;
       DisplaySyncMessage(
           fmt::format("EmuBank failed to upload {}", BindingDisplayName(binding.relative_path)),
@@ -7072,13 +7227,27 @@ private:
     {
       m_recovery_journal_unreadable.store(true, std::memory_order_release);
     }
+    const bool legacy_selector_schema = Policy::DurableSelectorArraysMayBeOmitted(
+        root_object.contains("ancestor_invalidation_pending"),
+        root_object.contains("ancestor_invalidation_selectors_complete"),
+        root_object.contains("ancestor_invalidation_game_selectors"),
+        root_object.contains("ancestor_invalidation_path_selectors"));
     m_ancestor_invalidation_pending =
         ReadBoolFromJson(root_object, "ancestor_invalidation_pending").value_or(false);
     const auto load_selector_array =
-        [&root_object](std::string_view key, auto&& normalize,
-                       std::set<std::string, std::less<>>* destination) {
+        [&root_object, legacy_selector_schema](std::string_view key, auto&& normalize,
+                                               std::set<std::string, std::less<>>* destination) {
           const auto found = root_object.find(std::string{key});
-          if (found == root_object.end() || !found->second.is<picojson::array>())
+          if (found == root_object.end())
+          {
+            if (legacy_selector_schema)
+            {
+              destination->clear();
+              return true;
+            }
+            return false;
+          }
+          if (!found->second.is<picojson::array>())
             return false;
           const picojson::array& values = found->second.get<picojson::array>();
           if (values.size() > 512)
@@ -7570,6 +7739,7 @@ private:
   std::optional<std::chrono::steady_clock::time_point> m_save_sync_deadline;
   std::optional<std::chrono::steady_clock::time_point> m_last_automatic_sync;
   u64 m_save_event_generation = 0;
+  u64 m_attempted_save_event_generation = 0;
   u64 m_consumed_save_event_generation = 0;
   u64 m_requested_generation = 0;
   u64 m_completed_generation = 0;
