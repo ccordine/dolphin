@@ -542,22 +542,9 @@ bool IsSafeGameIdentifier(std::string_view value)
          });
 }
 
-bool IsSafeSecret(std::string_view value)
-{
-  if (value.empty() || value.size() > 128)
-    return false;
-
-  return std::ranges::all_of(value, [](const char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
-  });
-}
-
 bool IsSafePairingToken(std::string_view value)
 {
-  return value.size() == 43 && std::ranges::all_of(value, [](const char c) {
-           return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-                  c == '-' || c == '_';
-         });
+  return value.size() == 43 && Policy::IsSafeSecret(value);
 }
 
 Common::HttpRequest::ProgressCallback LimitTransfer(
@@ -3769,7 +3756,7 @@ private:
     const std::string_view secret = separator == std::string::npos ?
                                         std::string_view{} :
                                         std::string_view{token}.substr(separator + 1);
-    if (!IsSafeIdentifier(device_id) || !IsSafeSecret(secret))
+    if (!IsSafeIdentifier(device_id) || !Policy::IsSafeSecret(secret))
     {
       SetStatus("EmuBank device token is invalid.");
       return std::nullopt;

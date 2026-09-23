@@ -12,6 +12,16 @@
 
 namespace UICommon::EmuBank::Policy
 {
+// Device pairing accepts URL-safe base64 secrets as well as alphanumeric tokens.
+// Validate their transport alphabet without changing the credential's bytes.
+constexpr bool IsSafeSecret(std::string_view value)
+{
+  return !value.empty() && value.size() <= 128 && std::ranges::all_of(value, [](char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+           c == '-' || c == '_';
+  });
+}
+
 // Ages within the comparison margin deliberately have unknown ordering. Filesystem timestamps and
 // server clocks are not precise enough to choose a destructive winner in that case.
 enum class SaveRecency

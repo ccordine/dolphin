@@ -32,6 +32,19 @@ Input DivergentTwoWay()
   };
 }
 
+TEST(EmuBankSyncPolicy, AcceptsPairedCredentialsWithoutChangingTheirAlphabet)
+{
+  const std::string paired_secret = std::string(41, 'a') + "-_";
+  EXPECT_EQ(paired_secret.size(), 43u);
+  EXPECT_TRUE(IsSafeSecret(paired_secret));
+  EXPECT_TRUE(IsSafeSecret("0123456789abcdefABCDEF"));
+  EXPECT_TRUE(IsSafeSecret(std::string(128, 'Z')));
+  EXPECT_FALSE(IsSafeSecret(""));
+  EXPECT_FALSE(IsSafeSecret(std::string(129, 'Z')));
+  for (const char bad : std::string{"\r\n\t ./+=%:"})
+    EXPECT_FALSE(IsSafeSecret(std::string(42, 'a') + bad));
+}
+
 TEST(EmuBankSyncPolicy, ComparesAgesOnlyOutsideSafetyMargin)
 {
   EXPECT_EQ(CompareAges(10s, 16s), SaveRecency::LocalNewer);
