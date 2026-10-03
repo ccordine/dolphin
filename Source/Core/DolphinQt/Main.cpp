@@ -29,7 +29,9 @@
 #include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
 #include "Core/DolphinAnalytics.h"
+#include "Core/HW/GCPad.h"
 #include "Core/System.h"
+#include "InputCommon/InputConfig.h"
 
 #include "DolphinQt/Host.h"
 #include "DolphinQt/MainWindow.h"
@@ -216,6 +218,7 @@ int main(int argc, char* argv[])
     save_state_path = static_cast<const char*>(options.get("save_state"));
   }
 
+  std::string native_game;
   std::unique_ptr<BootParameters> boot;
   bool game_specified = false;
   if (options.is_set("exec"))
@@ -223,6 +226,8 @@ int main(int argc, char* argv[])
     const std::list<std::string> paths_list = options.all("exec");
     const std::vector<std::string> paths{std::make_move_iterator(std::begin(paths_list)),
                                          std::make_move_iterator(std::end(paths_list))};
+    if (paths.size() == 1)
+      native_game = paths.front();
     boot = BootParameters::GenerateFromFile(
         paths, BootSessionData(save_state_path, DeleteSavestateAfterBoot::No));
     game_specified = true;
@@ -243,9 +248,32 @@ int main(int argc, char* argv[])
   }
   else if (!args.empty())
   {
+    native_game = args.front();
     boot = BootParameters::GenerateFromFile(
         args.front(), BootSessionData(save_state_path, DeleteSavestateAfterBoot::No));
     game_specified = true;
+  }
+
+  const bool native_netplay = options.is_set("netplay_role");
+  const int native_port =
+      options.is_set("netplay_port") ? static_cast<int>(options.get("netplay_port")) : 0;
+  const bool native_host =
+      native_netplay &&
+      std::string(static_cast<const char*>(options.get("netplay_role"))) == "host";
+  if ((native_netplay &&
+       (native_port < (native_host ? 0 : 1) || native_port > 65535 || native_game.empty() ||
+        !options.is_set("netplay_party") || !options.is_set("netplay_ready") ||
+        !options.is_set("netplay_host_player") || !options.is_set("netplay_client_player") ||
+        save_state_path || options.is_set("movie"))) ||
+      (!native_netplay &&
+       (options.is_set("netplay_port") || options.is_set("netplay_host_player") ||
+        options.is_set("netplay_client_player") || options.is_set("netplay_party") ||
+        options.is_set("netplay_ready"))) ||
+      !Pad::GetConfig()->SetLaunchDevices(options.all("controller_device")))
+  {
+    UICommon::EmuBank::Shutdown();
+    UICommon::Shutdown();
+    return 1;
   }
 
   int retval;
@@ -277,8 +305,19 @@ int main(int argc, char* argv[])
     Settings::Instance().InitDefaultPalette();
     Settings::Instance().ApplyStyle();
 
-    MainWindow win{Core::System::GetInstance(), std::move(boot),
+    MainWindow win{Core::System::GetInstance(), native_netplay ? nullptr : std::move(boot),
                    static_cast<const char*>(options.get("movie"))};
+    if (native_netplay &&
+        !win.StartNativeNetPlay(native_game, native_host, static_cast<u16>(native_port),
+                                static_cast<const char*>(options.get("netplay_host_player")),
+                                static_cast<const char*>(options.get("netplay_client_player")),
+                                static_cast<const char*>(options.get("netplay_party")),
+                                static_cast<const char*>(options.get("netplay_ready"))))
+    {
+      UICommon::EmuBank::Shutdown();
+      UICommon::Shutdown();
+      return 1;
+    }
 
 #if defined(USE_ANALYTICS) && USE_ANALYTICS
     if (!Config::Get(Config::MAIN_ANALYTICS_PERMISSION_ASKED))

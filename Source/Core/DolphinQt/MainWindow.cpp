@@ -41,6 +41,10 @@
 #include "Common/Version.h"
 #include "Common/WindowSystemInfo.h"
 
+#include <QCoreApplication>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QSaveFile>
 #include "Core/AchievementManager.h"
 #include "Core/Boot/Boot.h"
 #include "Core/BootManager.h"
@@ -1633,6 +1637,59 @@ void MainWindow::BootWiiSystemMenu()
   StartGame(std::make_unique<BootParameters>(BootParameters::NANDTitle{Titles::SYSTEM_MENU}));
 }
 
+bool MainWindow::StartNativeNetPlay(const std::string& game_path, bool hosting, u16 port,
+                                    const std::string& host_player,
+                                    const std::string& client_player, const std::string& party_id,
+                                    const std::string& ready_path)
+{
+  auto game = std::make_shared<UICommon::GameFile>(game_path);
+  if (!game->IsValid() || (!hosting && port == 0) || host_player.empty() || client_player.empty() ||
+      host_player == client_player)
+    return false;
+  m_native_netplay = true;
+  m_native_party_id = party_id;
+  m_native_ready_path = ready_path;
+  m_native_host_player = host_player;
+  m_native_client_player = client_player;
+  m_native_netplay_port = port;
+  connect(&Settings::Instance(), &Settings::EmulationStateChanged, this, [this](Core::State state) {
+    if (state == Core::State::Running)
+      WriteNativeNetPlayReady("playing");
+    else if (state == Core::State::Uninitialized)
+      WriteNativeNetPlayReady("stopped");
+  });
+  m_netplay_dialog->SetNativeParty(game, host_player, client_player);
+  Config::SetCurrent(Config::NETPLAY_TRAVERSAL_CHOICE, std::string("direct"));
+  Config::SetCurrent(Config::NETPLAY_USE_UPNP, false);
+  Config::SetCurrent(Config::NETPLAY_USE_INDEX, false);
+  Config::SetCurrent(Config::NETPLAY_HOST_PORT, port);
+  Config::SetCurrent(Config::NETPLAY_CONNECT_PORT, port);
+  Config::SetCurrent(Config::NETPLAY_ADDRESS, std::string("127.0.0.1"));
+  Config::SetCurrent(Config::NETPLAY_NICKNAME, hosting ? host_player : client_player);
+  if (!(hosting ? NetPlayHost(*game) : NetPlayJoin()))
+    return false;
+  if (hosting)
+    m_native_netplay_port = Settings::Instance().GetNetPlayServer()->GetPort();
+  WriteNativeNetPlayReady(hosting ? "listening" : "connected");
+  return true;
+}
+
+void MainWindow::WriteNativeNetPlayReady(const std::string& state)
+{
+  QSaveFile receipt(QString::fromStdString(m_native_ready_path));
+  if (!receipt.open(QIODevice::WriteOnly))
+    return;
+  const QJsonObject ready{
+      {QStringLiteral("partyId"), QString::fromStdString(m_native_party_id)},
+      {QStringLiteral("hostRunId"), QString::fromStdString(m_native_host_player)},
+      {QStringLiteral("clientRunId"), QString::fromStdString(m_native_client_player)},
+      {QStringLiteral("pid"), QCoreApplication::applicationPid()},
+      {QStringLiteral("port"), m_native_netplay_port},
+      {QStringLiteral("state"), QString::fromStdString(state)}};
+  if (receipt.write(QJsonDocument(ready).toJson(QJsonDocument::Compact)) >= 0)
+    receipt.commit();
+}
+
 void MainWindow::NetPlayInit()
 {
   const auto& game_list_model = m_game_list->GetGameListModel();
@@ -1759,10 +1816,10 @@ bool MainWindow::NetPlayHost(const UICommon::GameFile& game)
     host_port = Config::Get(Config::NETPLAY_LISTEN_PORT);
 
   // Create Server
-  Settings::Instance().ResetNetPlayServer(
-      new NetPlay::NetPlayServer(host_port, use_upnp, m_netplay_dialog,
-                                 NetPlay::NetTraversalConfig{is_traversal, traversal_host,
-                                                             traversal_port, traversal_port_alt}));
+  Settings::Instance().ResetNetPlayServer(new NetPlay::NetPlayServer(
+      host_port, use_upnp, m_netplay_dialog,
+      NetPlay::NetTraversalConfig{is_traversal, traversal_host, traversal_port, traversal_port_alt},
+      m_native_netplay));
 
   if (!Settings::Instance().GetNetPlayServer()->is_connected)
   {

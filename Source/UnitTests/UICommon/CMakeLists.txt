@@ -1,1 +1,3 @@
 add_dolphin_test(EmuBankSyncPolicyTest EmuBankSyncPolicyTest.cpp)
+
+add_dolphin_test(NativeControllerSelectionTest NativeControllerSelectionTest.cpp)
