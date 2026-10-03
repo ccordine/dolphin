@@ -276,6 +276,14 @@ int main(int argc, char* argv[])
     return 1;
   }
 
+  if (options.is_set("native_run") != options.is_set("native_party_root") ||
+      (options.is_set("native_run") && native_game.empty()))
+  {
+    UICommon::EmuBank::Shutdown();
+    UICommon::Shutdown();
+    return 1;
+  }
+
   int retval;
 
   if (save_state_path && !game_specified)
@@ -307,6 +315,14 @@ int main(int argc, char* argv[])
 
     MainWindow win{Core::System::GetInstance(), native_netplay ? nullptr : std::move(boot),
                    static_cast<const char*>(options.get("movie"))};
+    if (options.is_set("native_run") &&
+        !win.StartNativeControl(native_game, static_cast<const char*>(options.get("native_run")),
+                                static_cast<const char*>(options.get("native_party_root"))))
+    {
+      UICommon::EmuBank::Shutdown();
+      UICommon::Shutdown();
+      return 1;
+    }
     if (native_netplay &&
         !win.StartNativeNetPlay(native_game, native_host, static_cast<u16>(native_port),
                                 static_cast<const char*>(options.get("netplay_host_player")),

@@ -12,6 +12,9 @@
 #include <QDropEvent>
 #include <QFileInfo>
 #include <QIcon>
+#include <QLocalServer>
+#include <QLocalSocket>
+#include <QRegularExpression>
 #include <QMimeData>
 #include <QStackedWidget>
 #include <QStyleHints>
@@ -27,6 +30,10 @@
 
 #if defined(__unix__) || defined(__unix) || defined(__APPLE__)
 #include <signal.h>
+#ifdef Q_OS_LINUX
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 
 #include "QtUtils/SignalDaemon.h"
 #endif
@@ -927,6 +934,16 @@ void MainWindow::TogglePause()
 void MainWindow::OnStopComplete()
 {
   m_stop_requested = false;
+  if (m_native_control_transition && !m_exit_requested)
+  {
+    // This is a new linked match in the same owned process and native window.
+    // Keep the render widget and batch application alive across the core restart.
+    m_native_control_transition = false;
+    if (!StartNativeNetPlay(m_native_managed_game, true, 0, m_native_host_player,
+                           m_native_client_player, m_native_party_id, m_native_ready_path))
+      WriteNativeNetPlayReady("failed");
+    return;
+  }
   HideRenderWidget(!m_exit_requested, m_exit_requested);
 #ifdef USE_DISCORD_PRESENCE
   if (!m_netplay_dialog->isVisible())
@@ -1077,6 +1094,13 @@ bool MainWindow::RequestStop()
 }
 
 void MainWindow::ForceStop()
+{
+  // A deliberate Stop/Close cancels any pending native transition.
+  m_native_control_transition = false;
+  StopCore();
+}
+
+void MainWindow::StopCore()
 {
   Core::Stop(m_system);
 }
@@ -1635,6 +1659,109 @@ void MainWindow::PerformOnlineUpdate(const std::string& region)
 void MainWindow::BootWiiSystemMenu()
 {
   StartGame(std::make_unique<BootParameters>(BootParameters::NANDTitle{Titles::SYSTEM_MENU}));
+}
+
+bool MainWindow::StartNativeControl(const std::string& game_path, const std::string& run_id,
+                                    const std::string& party_root)
+{
+#ifdef Q_OS_LINUX
+  const QRegularExpression identity(QStringLiteral("^[a-z2-7]{26}$"));
+  const QFileInfo root(QString::fromStdString(party_root));
+  if (!identity.match(QString::fromStdString(run_id)).hasMatch() || !root.isDir() ||
+      root.isSymLink() || !root.isAbsolute() || root.canonicalFilePath() != root.absoluteFilePath())
+    return false;
+  m_native_managed_game = game_path;
+  m_native_managed_run = run_id;
+  m_native_party_root = party_root;
+  m_native_control = new QLocalServer(this);
+  m_native_control->setSocketOptions(QLocalServer::AbstractNamespaceOption);
+  m_native_control->setMaxPendingConnections(8);
+  connect(m_native_control, &QLocalServer::newConnection, this, [this, identity] {
+    while (auto* socket = m_native_control->nextPendingConnection())
+    {
+      ucred peer{};
+      socklen_t length = sizeof(peer);
+      if (getsockopt(socket->socketDescriptor(), SOL_SOCKET, SO_PEERCRED, &peer, &length) != 0 ||
+          length != sizeof(peer) || peer.uid != geteuid())
+      {
+        socket->abort();
+        socket->deleteLater();
+        continue;
+      }
+      socket->setReadBufferSize(4097);
+      connect(socket, &QLocalSocket::disconnected, socket, &QObject::deleteLater);
+      connect(socket, &QLocalSocket::readyRead, this, [this, socket, identity] {
+        QByteArray request = socket->property("native_request").toByteArray() + socket->readAll();
+        if (request.size() > 4096)
+        {
+          socket->abort();
+          return;
+        }
+        const auto newline = request.indexOf('\n');
+        if (newline < 0)
+        {
+          socket->setProperty("native_request", request);
+          return;
+        }
+        const QByteArray body = request.left(newline);
+        QJsonParseError parse_error;
+        const QJsonDocument document = QJsonDocument::fromJson(body, &parse_error);
+        const QJsonObject value = document.object();
+        const std::string party = value.value(QStringLiteral("partyId")).toString().toStdString();
+        const std::string host = value.value(QStringLiteral("hostRunId")).toString().toStdString();
+        const std::string client = value.value(QStringLiteral("clientRunId")).toString().toStdString();
+        bool begin_transition = false;
+        bool accepted = request.size() == newline + 1 && parse_error.error == QJsonParseError::NoError &&
+                        document.isObject() && value.size() == 3 &&
+                        document.toJson(QJsonDocument::Compact) == body &&
+                        identity.match(QString::fromStdString(party)).hasMatch() &&
+                        identity.match(QString::fromStdString(client)).hasMatch() &&
+                        host == m_native_managed_run && client != host;
+        if (accepted && (m_native_netplay || m_native_control_transition))
+        {
+          // A lost reply may repeat this exact operation, never restart its core.
+          accepted = party == m_native_party_id && host == m_native_host_player &&
+                     client == m_native_client_player;
+        }
+        else if (accepted)
+        {
+          const auto state = Core::GetState(m_system);
+          accepted = !m_exit_requested && !m_boot_in_progress && !m_pending_boot &&
+                     (state == Core::State::Running || state == Core::State::Paused);
+          if (accepted)
+          {
+            const QString directory = QString::fromStdString(m_native_party_root) +
+                                      QStringLiteral("/dolphin-party-") + QString::fromStdString(party);
+            const QFileInfo target(directory);
+            accepted = target.isDir() && !target.isSymLink() &&
+                       target.canonicalFilePath() == target.absoluteFilePath();
+            if (accepted)
+            {
+              m_native_party_id = party;
+              m_native_host_player = host;
+              m_native_client_player = client;
+              m_native_ready_path = directory.toStdString() + "/host-ready.json";
+              m_native_control_transition = true;
+              begin_transition = true;
+            }
+          }
+        }
+        socket->write(QJsonDocument(QJsonObject{{QStringLiteral("accepted"), accepted}})
+                          .toJson(QJsonDocument::Compact) + '\n');
+        socket->flush();
+        socket->disconnectFromServer();
+        if (begin_transition && m_native_control_transition &&
+            (Core::GetState(m_system) == Core::State::Running ||
+             Core::GetState(m_system) == Core::State::Paused))
+          StopCore();
+      });
+    }
+  });
+  return m_native_control->listen(QStringLiteral("daemonet-dolphin-%1-%2")
+                                     .arg(geteuid()).arg(QString::fromStdString(run_id)));
+#else
+  return false;
+#endif
 }
 
 bool MainWindow::StartNativeNetPlay(const std::string& game_path, bool hosting, u16 port,

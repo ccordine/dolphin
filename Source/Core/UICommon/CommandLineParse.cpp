@@ -107,6 +107,8 @@ std::unique_ptr<optparse::OptionParser> CreateParser(ParserOptions options)
 
   if (options == ParserOptions::IncludeGUIOptions)
   {
+    parser->add_option("--native-run").action("store").help("Owned native game execution identity");
+    parser->add_option("--native-party-root").action("store").help("Private native linked-game resources");
     parser->add_option("--netplay-role")
         .choices({"host", "client"})
         .help("Start native NetPlay before boot");
