@@ -269,7 +269,8 @@ int main(int argc, char* argv[])
        (options.is_set("netplay_port") || options.is_set("netplay_host_player") ||
         options.is_set("netplay_client_player") || options.is_set("netplay_party") ||
         options.is_set("netplay_ready"))) ||
-      !Pad::GetConfig()->SetLaunchDevices(options.all("controller_device")))
+      (options.is_set("controller_device") &&
+       !Pad::GetConfig()->SetLaunchDevices(options.all("controller_device"))))
   {
     UICommon::EmuBank::Shutdown();
     UICommon::Shutdown();
