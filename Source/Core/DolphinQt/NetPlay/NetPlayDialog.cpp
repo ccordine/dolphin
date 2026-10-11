@@ -460,6 +460,14 @@ void NetPlayDialog::OnIndexRefreshFailed(const std::string error)
   DisplayMessage(QString::fromStdString(error), "red");
 }
 
+void NetPlayDialog::SetNativeParty(std::shared_ptr<const UICommon::GameFile> game,
+                                   std::string host_player, std::string client_player)
+{
+  m_native_game = std::move(game);
+  m_native_host_player = std::move(host_player);
+  m_native_client_player = std::move(client_player);
+}
+
 void NetPlayDialog::OnStart()
 {
   if (!Settings::Instance().GetNetPlayClient()->DoAllPlayersHaveGame())
@@ -685,6 +693,26 @@ void NetPlayDialog::UpdateGUI()
 
   if (!server)
     return;
+
+  if (m_native_game && !m_native_start_requested && players.size() == 2 &&
+      client->DoAllPlayersHaveGame())
+  {
+    NetPlay::PlayerId host = 0, guest = 0;
+    for (const auto* player : players)
+    {
+      if (player->IsHost() && player->name == m_native_host_player)
+        host = player->pid;
+      if (!player->IsHost() && player->name == m_native_client_player)
+        guest = player->pid;
+    }
+    if (host && guest)
+    {
+      server->SetPadMapping({host, guest, 0, 0});
+      server->SetWiimoteMapping({0, 0, 0, 0});
+      m_native_start_requested = true;
+      OnStart();
+    }
+  }
 
   const bool is_local_ip_selected = m_room_box->currentIndex() > (m_use_traversal ? 1 : 0);
   if (is_local_ip_selected)
@@ -1056,6 +1084,12 @@ NetPlayDialog::FindGameFile(const NetPlay::SyncIdentifier& sync_identifier,
 
   const std::optional<std::shared_ptr<const UICommon::GameFile>> game_file =
       RunOnObject(this, [this, &sync_identifier, found] {
+        if (m_native_game)
+        {
+          *found = m_native_game->CompareSyncIdentifier(sync_identifier);
+          if (*found == NetPlay::SyncIdentifierComparison::SameGame)
+            return m_native_game;
+        }
         for (int i = 0; i < m_game_list_model.rowCount(QModelIndex()); i++)
         {
           auto file = m_game_list_model.GetGameFile(i);
@@ -1166,6 +1200,8 @@ void NetPlayDialog::LoadSettings()
 
 void NetPlayDialog::SaveSettings()
 {
+  if (m_native_game)
+    return;
   Config::ConfigChangeCallbackGuard config_guard;
 
   if (m_host_input_authority)

@@ -107,6 +107,25 @@ std::unique_ptr<optparse::OptionParser> CreateParser(ParserOptions options)
 
   if (options == ParserOptions::IncludeGUIOptions)
   {
+    parser->add_option("--native-run").action("store").help("Owned native game execution identity");
+    parser->add_option("--native-party-root").action("store").help("Private native linked-game resources");
+    parser->add_option("--netplay-role")
+        .choices({"host", "client"})
+        .help("Start native NetPlay before boot");
+    parser->add_option("--netplay-party").action("store").help("Prepared native pair identity");
+    parser->add_option("--netplay-ready")
+        .action("store")
+        .help("Atomic native host readiness receipt");
+    parser->add_option("--netplay-port").type("int").help("Native loopback NetPlay port");
+    parser->add_option("--netplay-host-player")
+        .action("store")
+        .help("Prepared host player identity");
+    parser->add_option("--netplay-client-player")
+        .action("store")
+        .help("Prepared client player identity");
+    parser->add_option("--controller-device")
+        .action("append")
+        .help("Process-only GameCube port=device (or physical)");
     parser->add_option("-d", "--debugger")
         .action("store_true")
         .help("Show the debugger pane and additional View menu options");

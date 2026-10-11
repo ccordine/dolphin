@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include <array>
+#include <list>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -32,6 +35,10 @@ public:
   bool LoadConfig();
   void SaveConfig();
 
+  // Trusted native launch selection, applied only to this process. The saved
+  // profiles remain unchanged, including when a selected pad hotplugs later.
+  bool SetLaunchDevices(const std::list<std::string>& selections);
+
   template <typename T, typename... Args>
   void CreateController(Args&&... args)
   {
@@ -58,6 +65,8 @@ public:
   void GenerateControllerTextures();
 
 private:
+  void ApplyLaunchDevices();
+  std::array<std::optional<std::string>, 4> m_launch_devices;
   Common::EventHook m_hotplug_event_hook;
   std::vector<std::unique_ptr<ControllerEmu::EmulatedController>> m_controllers;
   const std::string m_ini_name;

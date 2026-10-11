@@ -86,6 +86,8 @@ public:
 
   void LoadSettings();
   void SaveSettings();
+  void SetNativeParty(std::shared_ptr<const UICommon::GameFile> game, std::string host_player,
+                      std::string client_player);
 
   void ShowGameDigestDialog(const std::string& title) override;
   void SetGameDigestProgress(int pid, int progress) override;
@@ -180,5 +182,9 @@ private:
   int m_old_player_count = 0;
   bool m_host_input_authority = false;
 
+  std::shared_ptr<const UICommon::GameFile> m_native_game;
+  std::string m_native_host_player;
+  std::string m_native_client_player;
+  bool m_native_start_requested = false;
   StartGameCallback m_start_game_callback;
 };

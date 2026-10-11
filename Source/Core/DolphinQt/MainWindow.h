@@ -18,6 +18,7 @@
 #include "Core/Boot/Boot.h"
 #include "DolphinQt/FIFO/FIFOPlayerWindow.h"
 
+class QLocalServer;
 class QMenu;
 class QStackedWidget;
 class QString;
@@ -87,6 +88,12 @@ public:
   explicit MainWindow(Core::System& system, std::unique_ptr<BootParameters> boot_parameters,
                       const std::string& movie_path);
   ~MainWindow() override;
+  bool StartNativeNetPlay(const std::string& game_path, bool hosting, u16 port,
+                          const std::string& host_player, const std::string& client_player,
+                          const std::string& party_id, const std::string& ready_path);
+
+  bool StartNativeControl(const std::string& game_path, const std::string& run_id,
+                          const std::string& party_root);
 
   WindowSystemInfo GetWindowSystemInfo() const;
 
@@ -109,6 +116,7 @@ private:
   // May ask for confirmation. Returns whether or not it actually stopped.
   bool RequestStop();
   void ForceStop();
+  void StopCore();
   void Reset();
   void FrameAdvance();
   void StateLoad();
@@ -266,6 +274,18 @@ private:
   FreeLookWindow* m_freelook_window = nullptr;
 
   HotkeyScheduler* m_hotkey_scheduler;
+  void WriteNativeNetPlayReady(const std::string& state);
+  bool m_native_netplay = false;
+  bool m_native_control_transition = false;
+  QLocalServer* m_native_control = nullptr;
+  std::string m_native_managed_game;
+  std::string m_native_managed_run;
+  std::string m_native_party_root;
+  std::string m_native_party_id;
+  std::string m_native_ready_path;
+  std::string m_native_host_player;
+  std::string m_native_client_player;
+  u16 m_native_netplay_port = 0;
   NetPlayDialog* m_netplay_dialog;
   DiscordHandler* m_netplay_discord;
   NetPlaySetupDialog* m_netplay_setup_dialog;

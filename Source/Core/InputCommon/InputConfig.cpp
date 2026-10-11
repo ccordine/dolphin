@@ -30,6 +30,10 @@ InputConfig::~InputConfig() = default;
 bool InputConfig::LoadConfig()
 {
   Common::IniFile inifile;
+  Common::IniFile gamepad_profile;
+  if (std::ranges::any_of(m_launch_devices,
+                          [](const auto& selected) { return selected.has_value(); }))
+    gamepad_profile.Load(GetSysProfileDirectoryPath() + "SDL Gamepad.ini");
   bool useProfile[MAX_BBMOTES] = {false, false, false, false, false};
   static constexpr std::array<std::string_view, MAX_BBMOTES> num = {"1", "2", "3", "4", "BB"};
   std::string profile[MAX_BBMOTES];
@@ -91,12 +95,24 @@ bool InputConfig::LoadConfig()
       {
         config = *inifile.GetOrCreateSection(controller->GetName());
       }
+      // The existing first SDL profile provides the same standardized pad
+      // bindings for an explicitly assigned additional GameCube port.
+      if (n < 4 && m_launch_devices[n] && n != 0)
+        m_controllers[0]->SaveConfig(&config);
+      if (n < 4 && m_launch_devices[n])
+      {
+        std::string device;
+        config.Get("Device", &device);
+        if (!device.starts_with("SDL/"))
+          config = *gamepad_profile.GetOrCreateSection("Profile");
+      }
       controller->LoadConfig(&config);
       controller->UpdateReferences(g_controller_interface);
 
       // Next profile
       n++;
     }
+    ApplyLaunchDevices();
     return true;
   }
   else
@@ -110,11 +126,87 @@ bool InputConfig::LoadConfig()
     }
     for (size_t i = 1; i < m_controllers.size(); ++i)
     {
-      // Calling the base version just clears all settings without overwriting them with a default
-      m_controllers[i]->EmulatedController::LoadDefaults(g_controller_interface);
+      if (i < m_launch_devices.size() && m_launch_devices[i])
+      {
+        Common::IniFile::Section config;
+        m_controllers[0]->SaveConfig(&config);
+        m_controllers[i]->LoadConfig(&config);
+      }
+      else
+      {
+        // Unassigned ports retain their ordinary empty default profile.
+        m_controllers[i]->EmulatedController::LoadDefaults(g_controller_interface);
+      }
       m_controllers[i]->UpdateReferences(g_controller_interface);
     }
+    for (size_t i = 0; i < m_launch_devices.size() && i < m_controllers.size(); ++i)
+    {
+      if (m_launch_devices[i])
+        m_controllers[i]->LoadConfig(gamepad_profile.GetOrCreateSection("Profile"));
+    }
+    ApplyLaunchDevices();
     return false;
+  }
+}
+
+bool InputConfig::SetLaunchDevices(const std::list<std::string>& selections)
+{
+  std::array<std::optional<std::string>, 4> prepared;
+  for (const auto& selected : selections)
+  {
+    if (selected.size() < 3 || selected.size() > 258 || selected[0] < '1' || selected[0] > '4' ||
+        selected[1] != '=' || selected.find_first_of("\r\n") != std::string::npos)
+      return false;
+    const size_t port = selected[0] - '1';
+    if (prepared[port])
+      return false;
+    prepared[port] = selected.substr(2);
+  }
+  m_launch_devices = std::move(prepared);
+  ApplyLaunchDevices();
+  return true;
+}
+
+void InputConfig::ApplyLaunchDevices()
+{
+  const auto state_lock = ControllerEmu::EmulatedController::GetStateLock();
+  const auto devices = g_controller_interface.GetAllDevices();
+  for (size_t port = 0; port < m_launch_devices.size() && port < m_controllers.size(); ++port)
+  {
+    if (!m_launch_devices[port])
+      continue;
+    auto& controller = m_controllers[port];
+    const std::string& selection = *m_launch_devices[port];
+    ciface::Core::DeviceQualifier qualifier("SDL", 0, selection);
+    if (selection == "physical")
+    {
+      // Preserve a connected saved physical selection. A new physical pad can
+      // arrive after launch; never let another run's virtual pad claim it.
+      const auto& saved = controller->GetDefaultDevice();
+      qualifier = ciface::Core::DeviceQualifier("SDL", 0, "");
+      for (const auto& device : devices)
+      {
+        if (device->GetSource() != "SDL" || device->GetName().starts_with("Daemonet "))
+          continue;
+        if (qualifier.name.empty() || saved == device.get())
+          qualifier.FromDevice(device.get());
+        if (saved == device.get())
+          break;
+      }
+    }
+    else
+    {
+      for (const auto& device : devices)
+      {
+        if (device->GetSource() == "SDL" && device->GetName() == selection)
+        {
+          qualifier.FromDevice(device.get());
+          break;
+        }
+      }
+    }
+    controller->SetDefaultDevice(std::move(qualifier));
+    controller->UpdateReferences(g_controller_interface);
   }
 }
 
@@ -125,8 +217,11 @@ void InputConfig::SaveConfig()
   Common::IniFile inifile;
   inifile.Load(ini_filename);
 
-  for (auto& controller : m_controllers)
+  for (size_t i = 0; i < m_controllers.size(); ++i)
   {
+    if (i < m_launch_devices.size() && m_launch_devices[i])
+      continue;
+    auto& controller = m_controllers[i];
     controller->SaveConfig(inifile.GetOrCreateSection(controller->GetName()));
   }
 
@@ -168,6 +263,7 @@ void InputConfig::RegisterHotplugCallback()
   // Update control references on all controllers
   // as configured devices may have been added or removed.
   m_hotplug_event_hook = g_controller_interface.RegisterDevicesChangedCallback([this] {
+    ApplyLaunchDevices();
     for (auto& controller : m_controllers)
       controller->UpdateReferences(g_controller_interface);
   });

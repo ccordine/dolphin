@@ -118,7 +118,7 @@ NetPlayServer::~NetPlayServer()
 
 // called from ---GUI--- thread
 NetPlayServer::NetPlayServer(const u16 port, const bool forward_port, NetPlayUI* dialog,
-                             const NetTraversalConfig& traversal_config)
+                             const NetTraversalConfig& traversal_config, bool loopback_only)
     : m_dialog(dialog)
 {
   //--use server time
@@ -152,6 +152,8 @@ NetPlayServer::NetPlayServer(const u16 port, const bool forward_port, NetPlayUI*
   {
     ENetAddress serverAddr;
     serverAddr.host = ENET_HOST_ANY;
+    if (loopback_only)
+      enet_address_set_host_ip(&serverAddr, "127.0.0.1");
     serverAddr.port = port;
     m_server = enet_host_create(&serverAddr, 10, CHANNEL_COUNT, 0, 0);
     if (m_server != nullptr)
